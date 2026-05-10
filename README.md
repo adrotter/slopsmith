@@ -171,7 +171,9 @@ pct restore 200 /var/lib/vz/template/cache/slopsmith-ct.tar.zst \
     --net0 name=eth0,bridge=vmbr0,ip=dhcp --unprivileged 1 --start 1
 ```
 
-Override the default Rocksmith source path via environment (use `sudo env` so the variable survives `sudo`): `sudo env ROCKSMITH_SRC_DLC=/path/to/Rocksmith2014 bash build-proxmox-ct.sh`.
+Override the Rocksmith install root (the directory that contains both `dlc/` and `songs.psarc`) via environment, using `sudo env` so the variable survives `sudo`: `sudo env ROCKSMITH_SRC_DIR=/path/to/Rocksmith2014 bash build-proxmox-ct.sh`.
+
+The build copies `*_p.psarc` files from `${ROCKSMITH_SRC_DIR}/dlc/` and `songs.psarc` from `${ROCKSMITH_SRC_DIR}/` — point the variable at the install root, not at the `dlc/` folder. .NET is installed only as a build dependency; RsCli is published with `--self-contained`, so the system-wide .NET tree is removed before the rootfs is packaged (the runtime ships bundled inside `RsCli`).
 
 The build verifies downloaded files (vgmstream, dotnet-install.sh) against pinned SHA256 hashes. Set `SKIP_HASH_CHECK=1` to bypass verification — useful when an upstream artifact (e.g. `dot.net/v1/dotnet-install.sh`) rolls and the pinned hash hasn't been refreshed yet:
 

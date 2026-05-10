@@ -13,7 +13,9 @@
 #   sudo bash build-proxmox-ct.sh arm64 slopsmith-ct
 #
 # Environment variables:
-#   ROCKSMITH_SRC_DLC   Path to Rocksmith2014 install (default: /mnt/z/Steam/...)
+#   ROCKSMITH_SRC_DIR   Path to Rocksmith2014 install root, containing both
+#                       dlc/*_p.psarc and songs.psarc (default: /mnt/z/Steam/...).
+#                       The legacy ROCKSMITH_SRC_DLC name is still accepted.
 #   SKIP_HASH_CHECK=1   Bypass SHA256 verification — for unpinned hashes OR
 #                       to override mismatches when an upstream artifact rolls
 #                       (e.g. dot.net/v1/dotnet-install.sh). Use with caution.
@@ -57,7 +59,9 @@ RSCLI_DIR="/opt/rscli"
 DLC_DIR="/dlc"
 CONFIG_DIR="/config"
 ROCKSMITH_DIR="/rocksmith"
-ROCKSMITH_SRC_DLC="${ROCKSMITH_SRC_DLC:-/mnt/z/Steam/steamapps/common/Rocksmith2014}"
+# Accept the legacy ROCKSMITH_SRC_DLC for backwards compatibility, but prefer
+# ROCKSMITH_SRC_DIR (the variable points at the install ROOT, not just dlc/).
+ROCKSMITH_SRC_DIR="${ROCKSMITH_SRC_DIR:-${ROCKSMITH_SRC_DLC:-/mnt/z/Steam/steamapps/common/Rocksmith2014}}"
 SVC_USER="slopsmith"
 
 # Coloured logging
@@ -205,10 +209,12 @@ r "apt-get update -qq && apt-get install -y --no-install-recommends \
 ok "System packages installed."
 
 # =============================================================================
-# 3. Install .NET  (needed to build AND run RsCli – no SDK in final Docker
-#    stage, but in an LXC the runtime must be present)
+# 3. Install .NET  (build-time only — RsCli is published with --self-contained,
+#    so the entire /usr/share/dotnet tree is removed after build to save ~700MB
+#    and shrink the runtime attack surface, mirroring the Dockerfile's slim
+#    final stage)
 # =============================================================================
-info "Installing .NET ${DOTNET_CHANNEL} runtime + SDK …"
+info "Installing .NET ${DOTNET_CHANNEL} SDK (build-only, removed after publish) …"
 r "curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh"
 verify_sha256 "${ROOTFS}/tmp/dotnet-install.sh" "${DOTNET_INSTALL_SHA256}" "dotnet-install.sh"
 r "chmod +x /tmp/dotnet-install.sh \
@@ -259,13 +265,16 @@ r "export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 \
     && cd '${FSPROJ_DIR_INNER}' \
     && dotnet publish -c Release -r '${RID}' --self-contained -o '${RSCLI_DIR}'"
  
-# Clean up build artifacts to keep the image lean
-rm -rf "${ROOTFS}/opt/rs2014" "${ROOTFS}/root/.nuget" "${ROOTFS}/root/.dotnet/toolResolverCache"
+# Clean up build artifacts to keep the image lean. RsCli is self-contained
+# (its publish output bundles its own .NET runtime under ${RSCLI_DIR}), so
+# the system-wide /usr/share/dotnet tree is build-only and gets dropped.
+rm -rf "${ROOTFS}/opt/rs2014" \
+       "${ROOTFS}/root/.nuget" \
+       "${ROOTFS}/root/.dotnet" \
+       "${ROOTFS}/usr/share/dotnet" \
+       "${ROOTFS}/usr/local/bin/dotnet"
 ok "RsCli built → ${RSCLI_DIR}"
- 
-# Tip: remove the SDK after build to save ~300 MB (runtime stays):
-rm -rf "${ROOTFS}/usr/share/dotnet/sdk"
- 
+
 # =============================================================================
 # 5. vgmstream-cli
 # =============================================================================
@@ -325,15 +334,15 @@ if [[ -d "config" ]]; then
     warn "  config/ not found."
   fi
 
-if compgen -G "${ROCKSMITH_SRC_DLC}/dlc/*_p.psarc" &>/dev/null; then
-  cp "${ROCKSMITH_SRC_DLC}"/dlc/*_p.psarc "${ROOTFS}${DLC_DIR}/"
+if compgen -G "${ROCKSMITH_SRC_DIR}/dlc/*_p.psarc" &>/dev/null; then
+  cp "${ROCKSMITH_SRC_DIR}"/dlc/*_p.psarc "${ROOTFS}${DLC_DIR}/"
   info "  Copied DLC psarc files."
 else
   warn "  No *_p.psarc files found – copy them into ${DLC_DIR} on Proxmox."
 fi
 
-if [[ -f "${ROCKSMITH_SRC_DLC}/songs.psarc" ]]; then
-    cp "${ROCKSMITH_SRC_DLC}/songs.psarc" "${ROOTFS}${ROCKSMITH_DIR}/"
+if [[ -f "${ROCKSMITH_SRC_DIR}/songs.psarc" ]]; then
+    cp "${ROCKSMITH_SRC_DIR}/songs.psarc" "${ROOTFS}${ROCKSMITH_DIR}/"
     info "  Copied songs.psarc"
   else
     warn "  songs.psarc not found."

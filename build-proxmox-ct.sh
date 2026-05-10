@@ -34,6 +34,15 @@ set -euo pipefail
 TARGETARCH="${1:-amd64}"
 OUTPUT_NAME="${2:-slopsmith-ct}"
 
+# OUTPUT_NAME is a positional arg that flows into BUILD_BASE (interpolated into
+# `mkdir -p` / `rm -rf` paths) and into the final tarball name. Reject anything
+# outside a safe filename charset so an input like `../../etc` can't escape
+# /tmp or shape the tarball path.
+if [[ ! "$OUTPUT_NAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "[ERROR] OUTPUT_NAME must match ^[A-Za-z0-9._-]+\$ (got: '${OUTPUT_NAME}')" >&2
+  exit 1
+fi
+
 # debootstrap requires a real Linux filesystem (ext4/tmpfs) – it creates
 # device nodes that NTFS/FUSE mounts (/mnt/c, /mnt/d …) cannot represent.
 # We build everything under /tmp (tmpfs) and copy the final tarball back.

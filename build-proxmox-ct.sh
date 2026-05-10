@@ -275,6 +275,7 @@ ok ".NET installed."
 # 4. Build RsCli inside the rootfs
 # =============================================================================
 info "Cloning Rocksmith2014.NET @ ${RS2014_NET_COMMIT:0:12} (host-side) …"
+mkdir -p "${ROOTFS}/opt"  # /opt is FHS-required, but be explicit
 rm -rf "${ROOTFS}/opt/rs2014"
 git clone --no-checkout --filter=blob:none "${RS2014_NET_REPO}" "${ROOTFS}/opt/rs2014"
 git -C "${ROOTFS}/opt/rs2014" checkout --quiet "${RS2014_NET_COMMIT}"

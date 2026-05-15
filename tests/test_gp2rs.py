@@ -110,7 +110,9 @@ def _converter_ebeats(converter, numerator, denominator, tempo_changes=None):
         tempo_changes=tempo_changes,
     )
     root = ET.fromstring(converter(song, 0))
-    return root.find("ebeats")
+    ebeats = root.find("ebeats")
+    assert ebeats is not None, "Converter output missing <ebeats> node"
+    return ebeats
 
 
 def _assert_ebeats(converter, numerator, denominator, expected_times, tempo_changes=None):

@@ -2484,6 +2484,28 @@ function createHighway() {
                                             _juceRoutingPromise = (async () => {
                                                 let pathLabel = '<missing>';
                                                 try {
+                                                    // Wait out any in-flight native-audio reconfiguration (e.g.
+                                                    // a NAM tone graph build that restarts the audio device)
+                                                    // before touching the JUCE backing engine — otherwise the
+                                                    // device restart races the backing-track load (and an
+                                                    // isAudioRunning() check landing mid-restart would skip
+                                                    // backing entirely). Raced against a local 3s timeout so a
+                                                    // plugin barrier that never settles cannot wedge song entry;
+                                                    // the try/catch + Promise.resolve wrapper also covers a
+                                                    // synchronous throw from the barrier call.
+                                                    if (typeof window.slopsmithAudioBarrier === 'function') {
+                                                        let barrierTimer;
+                                                        try {
+                                                            await Promise.race([
+                                                                Promise.resolve().then(() => window.slopsmithAudioBarrier()),
+                                                                new Promise((r) => { barrierTimer = setTimeout(r, 3000); }),
+                                                            ]);
+                                                        } catch (_) { /* barrier is best-effort */ }
+                                                        // Promise.race doesn't cancel the loser — clear the timer
+                                                        // when the barrier wins so rapid song switches don't leak.
+                                                        clearTimeout(barrierTimer);
+                                                        if (gen !== _wsGen) return; // navigated away during the wait
+                                                    }
                                                     if (await juceApi.isAudioRunning()) {
                                                         if (gen !== _wsGen) return; // stale
                                                         const res = await fetch(`/api/audio-local-path?url=${encodeURIComponent(audioUrl)}`);

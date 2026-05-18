@@ -60,9 +60,9 @@ function _applySongVolume(v) {
     // hook (it clears the hook on teardown for PSARC / stem-less songs).
     const stemsSetMaster = window.slopsmith?.stems?.setMasterVolume;
     if (typeof stemsSetMaster === 'function') {
-        // Guard the stems-plugin hook the same way the JUCE setGain path below
-        // is guarded: a synchronous throw or a rejected Promise from the plugin
-        // must not abort _applySongVolume before it returns / persists.
+        // A synchronous throw or a rejected Promise from the stems plugin hook
+        // must not abort _applySongVolume before it returns / persists. The
+        // try/catch covers a sync throw; the .catch() covers an async rejection.
         try {
             // `void` marks the floating Promise as intentionally discarded,
             // consistent with the other ignored async calls in this module.
@@ -74,9 +74,13 @@ function _applySongVolume(v) {
     if (window._juceMode) {
         const setGain = window.slopsmithDesktop?.audio?.setGain;
         if (typeof setGain === 'function') {
-            return Promise.resolve(setGain('backing', linear))
-                .catch(function () { /* IPC unavailable */ })
-                .then(function () { return normalized; });
+            // Same dual guard as the stems hook above: the try/catch covers a
+            // synchronous throw from setGain, the .catch() covers a rejected IPC.
+            try {
+                return Promise.resolve(setGain('backing', linear))
+                    .catch(function () { /* IPC unavailable */ })
+                    .then(function () { return normalized; });
+            } catch (_) { /* IPC unavailable */ }
         }
     }
     return Promise.resolve(normalized);

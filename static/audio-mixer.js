@@ -53,8 +53,24 @@ function _applySongVolume(v) {
     _songVolumeMemory = normalized;
     const a = _audioEl();
     if (a) a.volume = normalized / 100;
-    // Desktop + JUCE: song audio is mixed in the native engine; HTML5 volume is ignored.
     const linear = normalized / 100;
+    // Multi-stem sloppak: the stems plugin mutes the core <audio> element and
+    // routes every stem through its own master GainNode, so a.volume above is
+    // dead. Drive that master instead when the stems plugin has published its
+    // hook (it clears the hook on teardown for PSARC / stem-less songs).
+    const stemsSetMaster = window.slopsmith?.stems?.setMasterVolume;
+    if (typeof stemsSetMaster === 'function') {
+        // Guard the stems-plugin hook the same way the JUCE setGain path below
+        // is guarded: a synchronous throw or a rejected Promise from the plugin
+        // must not abort _applySongVolume before it returns / persists.
+        try {
+            // `void` marks the floating Promise as intentionally discarded,
+            // consistent with the other ignored async calls in this module.
+            void Promise.resolve(stemsSetMaster(linear))
+                .catch(function () { /* stems hook unavailable */ });
+        } catch (_) { /* stems hook unavailable */ }
+    }
+    // Desktop + JUCE: song audio is mixed in the native engine; HTML5 volume is ignored.
     if (window._juceMode) {
         const setGain = window.slopsmithDesktop?.audio?.setGain;
         if (typeof setGain === 'function') {

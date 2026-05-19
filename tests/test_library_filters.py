@@ -322,6 +322,14 @@ def test_query_stats_artist_count_is_case_insensitive(client, server_mod):
     assert stats["letters"].get("T") == 1
 
 
+def test_query_stats_groups_non_ascii_artist_letters_under_hash(client, server_mod):
+    _put(server_mod, filename="angstrom.psarc", title="Angstrom", artist="Ångström")
+
+    stats = client.get("/api/library/stats").json()
+
+    assert stats["letters"] == {"#": 1}
+
+
 def test_query_stats_ignores_null_letter_counts(server_mod):
     """Legacy/corrupt rows can surface as NULL-ish letter aggregate
     rows on some SQLite builds. The stats endpoint should ignore those

@@ -130,6 +130,25 @@ class ReadOnlyLibraryProvider:
         raise AssertionError("provider without song.sync capability should not be dispatched")
 
 
+class NonBrowsableLibraryProvider:
+    id = "remote:actions-only"
+    label = "Actions Only"
+    kind = "remote"
+    capabilities = ("art.read", "song.sync")
+
+    def query_page(self, **kwargs):
+        raise AssertionError("provider without library.read capability should not be dispatched")
+
+    def query_artists(self, **kwargs):
+        raise AssertionError("provider without library.read capability should not be dispatched")
+
+    def query_stats(self, **kwargs):
+        raise AssertionError("provider without library.read capability should not be dispatched")
+
+    def tuning_names(self):
+        raise AssertionError("provider without library.read capability should not be dispatched")
+
+
 def test_registered_provider_handles_library_endpoints(tmp_path, monkeypatch):
     server = _import_server(tmp_path, monkeypatch)
     provider = FakeLibraryProvider()
@@ -226,6 +245,24 @@ def test_provider_art_and_sync_report_unsupported_when_missing(tmp_path, monkeyp
         synced = client.post("/api/library/providers/remote:readonly/songs/remote-song-id/sync")
         assert synced.status_code == 501
         assert "does not declare capability 'song.sync'" in synced.json()["detail"]
+
+    _close(server)
+
+
+def test_library_read_endpoints_require_library_read_capability(tmp_path, monkeypatch):
+    server = _import_server(tmp_path, monkeypatch)
+    server.register_library_provider(NonBrowsableLibraryProvider())
+
+    with TestClient(server.app) as client:
+        responses = [
+            client.get("/api/library", params={"provider": "remote:actions-only"}),
+            client.get("/api/library/artists", params={"provider": "remote:actions-only"}),
+            client.get("/api/library/stats", params={"provider": "remote:actions-only"}),
+            client.get("/api/library/tuning-names", params={"provider": "remote:actions-only"}),
+        ]
+        for response in responses:
+            assert response.status_code == 501
+            assert "does not declare capability 'library.read'" in response.json()["detail"]
 
     _close(server)
 

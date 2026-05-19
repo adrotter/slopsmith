@@ -679,8 +679,9 @@ class MetadataDB:
             count = int(count or 0)
             if count <= 0:
                 continue
-            if letter and str(letter).isalpha():
-                letters[str(letter)] = letters.get(str(letter), 0) + count
+            key = str(letter or "")
+            if key.isascii() and key.isalpha():
+                letters[key] = letters.get(key, 0) + count
             else:
                 letters["#"] = letters.get("#", 0) + count
         return {"total_songs": total, "total_artists": artist_count, "letters": letters}
@@ -2494,6 +2495,7 @@ def list_library(q: str = "", page: int = 0, size: int = 24, sort: str = "artist
     """Paginated library search through the selected library provider."""
     size = min(size, 100)
     library_provider = _get_library_provider(provider)
+    _require_library_provider_capability(library_provider, "library.read")
     songs, total = _call_library_provider(
         library_provider,
         "query_page",
@@ -2519,6 +2521,7 @@ def list_artists(letter: str = "", q: str = "", favorites: int = 0, page: int = 
                  has_lyrics: str = "", tunings: str = "", provider: str = "local"):
     """Get artists grouped by letter with albums and songs (for tree view)."""
     library_provider = _get_library_provider(provider)
+    _require_library_provider_capability(library_provider, "library.read")
     artists, total = _call_library_provider(
         library_provider,
         "query_artists",
@@ -2543,6 +2546,7 @@ def library_stats(favorites: int = 0, q: str = "", format: str = "",
     """Aggregate stats for the UI. Accepts the same filter params as
     /api/library so the letter bar mirrors the active grid filter set."""
     library_provider = _get_library_provider(provider)
+    _require_library_provider_capability(library_provider, "library.read")
     return _call_library_provider(
         library_provider,
         "query_stats",
@@ -2562,6 +2566,7 @@ def list_tuning_names(provider: str = "local"):
     so names appear in the same musical order the sort uses
     (slopsmith#22) — E Standard first, then nearest neighbors."""
     library_provider = _get_library_provider(provider)
+    _require_library_provider_capability(library_provider, "library.read")
     return _call_library_provider(library_provider, "tuning_names")
 
 

@@ -10,6 +10,7 @@ import sys
 import tempfile
 import shutil
 from pathlib import Path
+from typing import Any
 
 from logging_setup import configure_logging
 configure_logging()
@@ -19,7 +20,7 @@ log = logging.getLogger("slopsmith.server")
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 
 from psarc import unpack_psarc, read_psarc_entries
 from song import (
@@ -724,6 +725,9 @@ class LocalLibraryProvider:
             ],
         }
 
+    async def get_art(self, song_id: str):
+        return await get_song_art(song_id)
+
 
 class LibraryProviderRegistry:
     _REQUIRED_METHODS = ("query_page", "query_artists", "query_stats", "tuning_names")
@@ -826,7 +830,7 @@ def _get_library_provider(provider: str = "local") -> object:
     return library_provider
 
 
-def _call_library_provider(provider: object, method_name: str, **kwargs):
+def _call_library_provider(provider: object, method_name: str, **kwargs) -> Any:
     method = library_providers.provider_method(provider, method_name)
     if not callable(method):
         provider_id = library_providers.provider_id(provider)
@@ -835,6 +839,37 @@ def _call_library_provider(provider: object, method_name: str, **kwargs):
             detail=f"Library provider {provider_id!r} does not support {method_name}",
         )
     return method(**kwargs)
+
+
+async def _call_library_provider_async(provider: object, method_name: str, **kwargs) -> Any:
+    result = _call_library_provider(provider, method_name, **kwargs)
+    if inspect.isawaitable(result):
+        result = await result
+    return result
+
+
+def _library_art_response(result: Any) -> Response:
+    if result is None:
+        raise HTTPException(status_code=404, detail="Library provider returned no art")
+    if isinstance(result, Response):
+        return result
+    if isinstance(result, (bytes, bytearray, memoryview)):
+        return Response(content=bytes(result), media_type="image/png")
+    if isinstance(result, (str, Path)):
+        return FileResponse(str(result))
+    if isinstance(result, dict):
+        url = result.get("url") or result.get("art_url") or result.get("artUrl")
+        if isinstance(url, str) and url:
+            return RedirectResponse(url)
+        path = result.get("path") or result.get("file")
+        if isinstance(path, (str, Path)):
+            media_type = result.get("media_type") or result.get("content_type")
+            return FileResponse(str(path), media_type=media_type)
+        content = result.get("content") or result.get("bytes")
+        if isinstance(content, (bytes, bytearray, memoryview)):
+            media_type = result.get("media_type") or result.get("content_type") or "image/png"
+            return Response(content=bytes(content), media_type=media_type)
+    raise HTTPException(status_code=500, detail="Library provider returned unsupported art data")
 
 
 def _get_dlc_dir(cfg: dict | None = None) -> Path | None:
@@ -2390,6 +2425,26 @@ def list_library_providers():
     return {"providers": library_providers.list()}
 
 
+@app.get("/api/library/providers/{provider_id}/songs/{song_id:path}/art")
+async def get_library_provider_song_art(provider_id: str, song_id: str):
+    """Return album art for a song owned by a library provider."""
+    library_provider = _get_library_provider(provider_id)
+    result = await _call_library_provider_async(library_provider, "get_art", song_id=song_id)
+    return _library_art_response(result)
+
+
+@app.post("/api/library/providers/{provider_id}/songs/{song_id:path}/sync")
+async def sync_library_provider_song(provider_id: str, song_id: str):
+    """Ask a provider to sync a remote song into the local library/cache."""
+    library_provider = _get_library_provider(provider_id)
+    result = await _call_library_provider_async(library_provider, "sync_song", song_id=song_id)
+    if result is None:
+        return {"ok": True}
+    if isinstance(result, dict):
+        return result
+    return {"ok": True, "result": result}
+
+
 @app.get("/api/library")
 def list_library(q: str = "", page: int = 0, size: int = 24, sort: str = "artist",
                  dir: str = "asc", favorites: int = 0, format: str = "",
@@ -3226,7 +3281,6 @@ def import_settings(bundle: dict):
 # The bundle format is specified in docs/diagnostics-bundle-spec.md.
 
 from fastapi import Body
-from fastapi.responses import Response
 
 from diagnostics_bundle import build_bundle as _diag_build, preview_bundle as _diag_preview
 from diagnostics_hardware import collect as _diag_hardware

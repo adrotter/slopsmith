@@ -1,6 +1,7 @@
 import importlib
 import sys
 
+from fastapi.responses import Response
 from fastapi.testclient import TestClient
 
 
@@ -65,6 +66,8 @@ class FakeLibraryProvider:
         self.page_kwargs = None
         self.artist_kwargs = None
         self.stats_kwargs = None
+        self.art_song_id = None
+        self.sync_song_id = None
 
     def query_page(self, **kwargs):
         self.page_kwargs = kwargs
@@ -92,6 +95,33 @@ class FakeLibraryProvider:
 
     def tuning_names(self):
         return {"tunings": [{"name": "E Standard", "sort_key": 0, "count": 1}]}
+
+    def get_art(self, song_id: str):
+        self.art_song_id = song_id
+        return Response(content=b"fake-art", media_type="image/png")
+
+    def sync_song(self, song_id: str):
+        self.sync_song_id = song_id
+        return {"ok": True, "filename": "synced.psarc", "song_id": song_id}
+
+
+class ReadOnlyLibraryProvider:
+    id = "remote:readonly"
+    label = "Readonly Library"
+    kind = "remote"
+    capabilities = ("library.read",)
+
+    def query_page(self, **kwargs):
+        return ([], 0)
+
+    def query_artists(self, **kwargs):
+        return ([], 0)
+
+    def query_stats(self, **kwargs):
+        return {"total_songs": 0, "total_artists": 0, "letters": {}}
+
+    def tuning_names(self):
+        return {"tunings": []}
 
 
 def test_registered_provider_handles_library_endpoints(tmp_path, monkeypatch):
@@ -154,6 +184,16 @@ def test_registered_provider_handles_library_endpoints(tmp_path, monkeypatch):
         tunings = client.get("/api/library/tuning-names", params={"provider": "remote:frodo"}).json()
         assert tunings["tunings"][0]["name"] == "E Standard"
 
+        art = client.get("/api/library/providers/remote:frodo/songs/remote-song-id/art")
+        assert art.status_code == 200
+        assert art.content == b"fake-art"
+        assert art.headers["content-type"].startswith("image/png")
+        assert provider.art_song_id == "remote-song-id"
+
+        synced = client.post("/api/library/providers/remote:frodo/songs/remote-song-id/sync").json()
+        assert synced == {"ok": True, "filename": "synced.psarc", "song_id": "remote-song-id"}
+        assert provider.sync_song_id == "remote-song-id"
+
     _close(server)
 
 
@@ -164,6 +204,22 @@ def test_unknown_library_provider_returns_404(tmp_path, monkeypatch):
         response = client.get("/api/library", params={"provider": "missing"})
         assert response.status_code == 404
         assert "Unknown library provider" in response.json()["detail"]
+
+    _close(server)
+
+
+def test_provider_art_and_sync_report_unsupported_when_missing(tmp_path, monkeypatch):
+    server = _import_server(tmp_path, monkeypatch)
+    server.register_library_provider(ReadOnlyLibraryProvider())
+
+    with TestClient(server.app) as client:
+        art = client.get("/api/library/providers/remote:readonly/songs/remote-song-id/art")
+        assert art.status_code == 501
+        assert "does not support get_art" in art.json()["detail"]
+
+        synced = client.post("/api/library/providers/remote:readonly/songs/remote-song-id/sync")
+        assert synced.status_code == 501
+        assert "does not support sync_song" in synced.json()["detail"]
 
     _close(server)
 

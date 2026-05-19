@@ -112,13 +112,13 @@ function _libNavItems() {
         // the currently-displayed nodes so collapsed children don't
         // count as targets the keyboard can land on.
         const all = Array.from(tree.querySelectorAll(
-            '.artist-header, .album-header, .song-row[data-play]'
+            '.artist-header, .album-header, .song-row[data-play], .song-row[data-library-song]'
         ));
         items = all.filter(_isElementVisible);
         container = tree;
         mode = 'list';
     } else {
-        items = Array.from((grid || document).querySelectorAll('.song-card[data-play]'));
+        items = Array.from((grid || document).querySelectorAll('.song-card[data-play], .song-card[data-library-song]'));
         container = grid;
         mode = 'grid';
     }
@@ -378,6 +378,17 @@ function _handleLibArrowNav(e) {
         _setLibSelection(currentTarget, { focus: false });
         if (currentTarget.classList.contains('song-row') ||
             currentTarget.classList.contains('song-card')) {
+            if (currentTarget.dataset.librarySong && !currentTarget.dataset.play) {
+                const providerId = decodeURIComponent(currentTarget.dataset.libraryProvider || '');
+                if (!_providerSupports(providerId, 'song.sync')) return true;
+                syncLibrarySong(
+                    providerId,
+                    decodeURIComponent(currentTarget.dataset.librarySong || ''),
+                    currentTarget.querySelector('.library-sync-btn'),
+                    { playWhenReady: true },
+                );
+                return true;
+            }
             // Song row OR card → play it. Pass `dataset.play` raw to
             // match the click delegate; `playSong` handles decoding
             // internally so decoding here would double-decode and
@@ -937,6 +948,7 @@ async function showScreen(id) {
 const _LIB_VIEW_KEY = 'slopsmith.libView';
 const _LIB_SORT_KEY = 'slopsmith.libSort';
 const _LIB_FORMAT_KEY = 'slopsmith.libFormat';
+const _LIB_PROVIDER_KEY = 'slopsmith.libProvider';
 const _LIB_VIEW_VALUES = new Set(['grid', 'tree']);
 const _LIB_SORT_VALUES = new Set([
     'artist', 'artist-desc', 'title', 'title-desc',
@@ -966,6 +978,156 @@ function _readPersistedChoice(key, allowed, fallback) {
 }
 function _writePersistedChoice(key, value) {
     try { localStorage.setItem(key, value); } catch { /* private mode / quota */ }
+}
+
+function _readPersistedLibraryProvider() {
+    try {
+        const providerId = localStorage.getItem(_LIB_PROVIDER_KEY);
+        return providerId || 'local';
+    } catch {
+        return 'local';
+    }
+}
+
+let _libraryProviders = [{
+    id: 'local',
+    label: 'My Library',
+    kind: 'local',
+    capabilities: ['library.read', 'art.read', 'song.play'],
+    default: true,
+}];
+let _selectedLibraryProviderId = _readPersistedLibraryProvider();
+
+function _providerById(providerId) {
+    return _libraryProviders.find(provider => provider.id === providerId) || null;
+}
+
+function _activeLibraryProvider() {
+    return _providerById(_selectedLibraryProviderId) || _providerById('local') || _libraryProviders[0];
+}
+
+function _activeLibraryProviderId() {
+    return (_activeLibraryProvider() || {}).id || 'local';
+}
+
+function _isLocalLibraryProvider(providerId) {
+    const provider = _providerById(providerId);
+    return providerId === 'local' || (provider && provider.kind === 'local');
+}
+
+function _providerSupports(providerId, capability) {
+    const provider = _providerById(providerId);
+    return !!provider && Array.isArray(provider.capabilities) && provider.capabilities.includes(capability);
+}
+
+function _applyLibraryProviderToParams(params) {
+    params.set('provider', _activeLibraryProviderId());
+    return params;
+}
+
+function _resetLibraryProviderViewState() {
+    _libEpoch++;
+    currentPage = 0;
+    _treePage = 0;
+    _treeStats = null;
+    _tuningNames = null;
+    stopInfiniteScroll();
+}
+
+function _renderLibraryProviderSelector() {
+    const select = document.getElementById('lib-provider');
+    const title = document.getElementById('lib-title');
+    const activeProvider = _activeLibraryProvider();
+    if (select) {
+        select.innerHTML = _libraryProviders.map(provider =>
+            `<option value="${_escAttr(provider.id)}">${esc(provider.label || provider.id)}</option>`
+        ).join('');
+        select.value = activeProvider.id;
+        select.classList.toggle('hidden', _libraryProviders.length <= 1);
+    }
+    if (title) title.textContent = activeProvider.id === 'local' ? 'Your Library' : (activeProvider.label || activeProvider.id);
+}
+
+async function loadLibraryProviders({ restoreSaved = false, reloadOnChange = false } = {}) {
+    const beforeProviderId = _activeLibraryProviderId();
+    try {
+        const response = await fetch('/api/library/providers');
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        const providers = Array.isArray(data.providers) ? data.providers : [];
+        if (providers.length) _libraryProviders = providers;
+    } catch (error) {
+        console.warn('Failed to load library providers:', error);
+    }
+
+    const savedProviderId = restoreSaved ? _readPersistedLibraryProvider() : _selectedLibraryProviderId;
+    const hasSavedProvider = !!_providerById(savedProviderId);
+    const hasSelectedProvider = !!_providerById(_selectedLibraryProviderId);
+    if (hasSavedProvider) _selectedLibraryProviderId = savedProviderId;
+    else if (!hasSelectedProvider) _selectedLibraryProviderId = 'local';
+
+    _renderLibraryProviderSelector();
+    const afterProviderId = _activeLibraryProviderId();
+    if (reloadOnChange && afterProviderId !== beforeProviderId) {
+        _resetLibraryProviderViewState();
+        loadLibrary(0);
+    }
+}
+
+function setLibraryProvider(providerId) {
+    if (!_providerById(providerId)) return;
+    if (_selectedLibraryProviderId === providerId) return;
+    _selectedLibraryProviderId = providerId;
+    _writePersistedChoice(_LIB_PROVIDER_KEY, providerId);
+    _renderLibraryProviderSelector();
+    _resetLibraryProviderViewState();
+    loadLibrary(0);
+}
+
+function _libraryProviderIdForSong(song, fallbackProviderId) {
+    return String(
+        song.provider_id || song.providerId || song.library_provider_id ||
+        song.libraryProviderId || song.provider || fallbackProviderId || 'local'
+    );
+}
+
+function _librarySongId(song) {
+    const songId = song.song_id || song.songId || song.remote_id || song.remoteId || song.id || song.filename || '';
+    return String(songId || '');
+}
+
+function _libraryLocalFilename(song, providerId) {
+    if (_isLocalLibraryProvider(providerId)) return song.filename ? String(song.filename) : '';
+    const filename = song.local_filename || song.localFilename || song.synced_filename ||
+        song.syncedFilename || song.play_filename || song.playFilename || '';
+    return String(filename || '');
+}
+
+function _libraryDisplayFilename(song, providerId) {
+    return _libraryLocalFilename(song, providerId) || _librarySongId(song) || 'Unknown song';
+}
+
+function _librarySongTitle(song, providerId) {
+    const fallback = _libraryDisplayFilename(song, providerId);
+    return song.title || fallback.replace(/_p\.psarc$/i, '').replace(/_/g, ' ');
+}
+
+function _librarySongArtUrl(song, providerId) {
+    const explicitArt = song.art_url || song.artUrl || song.cover_url || song.coverUrl;
+    if (explicitArt) return explicitArt;
+    const version = song.mtime ? `?v=${Math.floor(song.mtime)}` : '';
+    if (_isLocalLibraryProvider(providerId)) {
+        const filename = _libraryLocalFilename(song, providerId);
+        return filename ? `/api/song/${encodeURIComponent(filename)}/art${version}` : '';
+    }
+    const songId = _librarySongId(song);
+    return songId ? `/api/library/providers/${encodeURIComponent(providerId)}/songs/${encodeURIComponent(songId)}/art${version}` : '';
+}
+
+function _librarySyncButton(providerId, songId, extraClass = '') {
+    if (_isLocalLibraryProvider(providerId) || !_providerSupports(providerId, 'song.sync') || !songId) return '';
+    return `<button data-library-sync-provider="${encodeURIComponent(providerId)}" data-library-sync-song="${encodeURIComponent(songId)}"
+        class="library-sync-btn ${extraClass} bg-accent/15 hover:bg-accent/25 border border-accent/30 rounded-lg text-xs font-medium text-accent-light transition">Sync</button>`;
 }
 
 let libView = _readPersistedChoice(_LIB_VIEW_KEY, _LIB_VIEW_VALUES, 'grid');
@@ -1167,7 +1329,8 @@ async function _renderTuningList() {
     if (!_tuningNames) {
         c.innerHTML = '<div class="text-xs text-gray-500 px-2">Loading...</div>';
         try {
-            const resp = await fetch('/api/library/tuning-names');
+            const params = _applyLibraryProviderToParams(new URLSearchParams());
+            const resp = await fetch(`/api/library/tuning-names?${params}`);
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
             _tuningNames = Array.isArray(data.tunings) ? data.tunings : [];
@@ -1391,6 +1554,7 @@ async function loadGridPage(page = 0) {
     const format = (document.getElementById('lib-format') || {}).value || '';
     const params = new URLSearchParams({ q, page, size: PAGE_SIZE, sort });
     if (format) params.set('format', format);
+    _applyLibraryProviderToParams(params);
     _applyLibFiltersToParams(params);
     const resp = await fetch(`/api/library?${params}`);
     const data = await resp.json();
@@ -1461,26 +1625,42 @@ function formatBadgeInline(fmt, stemCount) {
 
 function renderGridCards(songs, containerId = 'lib-grid', mode = 'replace') {
     const grid = document.getElementById(containerId);
-    const html = songs.map(s => {
-        const title = s.title || s.filename.replace(/_p\.psarc$/i, '').replace(/_/g, ' ');
-        const artist = s.artist || '';
-        const duration = s.duration ? formatTime(s.duration) : '';
-        const tuning = s.tuning || '';
-        const artUrl = `/api/song/${encodeURIComponent(s.filename)}/art${s.mtime ? `?v=${Math.floor(s.mtime)}` : ''}`;
-        const isSloppak = s.format === 'sloppak';
-        const stdRetune = !isSloppak && tuning && !s.has_estd &&
+    const screenProviderId = containerId.startsWith('fav') ? 'local' : _activeLibraryProviderId();
+    const html = songs.map(song => {
+        const providerId = _libraryProviderIdForSong(song, screenProviderId);
+        const localFilename = _libraryLocalFilename(song, providerId);
+        const songId = _librarySongId(song);
+        const title = _librarySongTitle(song, providerId);
+        const artist = song.artist || '';
+        const duration = song.duration ? formatTime(song.duration) : '';
+        const tuning = song.tuning || '';
+        const artUrl = _librarySongArtUrl(song, providerId);
+        const isLocalProvider = _isLocalLibraryProvider(providerId);
+        const isSloppak = song.format === 'sloppak';
+        const stdRetune = isLocalProvider && localFilename && !isSloppak && tuning && !song.has_estd &&
             ['Eb Standard', 'D Standard', 'C# Standard', 'C Standard'].includes(tuning);
         const retuneBtn = stdRetune
-            ? `<button data-retune="${encodeURIComponent(s.filename)}" data-title="${encodeURIComponent(title)}" data-tuning="${tuning}" data-target="E Standard"
+            ? `<button data-retune="${encodeURIComponent(localFilename)}" data-title="${encodeURIComponent(title)}" data-tuning="${tuning}" data-target="E Standard"
                 class="retune-btn mt-2 w-full px-2 py-1.5 bg-gold/10 hover:bg-gold/20 border border-gold/20 rounded-lg text-xs font-medium text-gold transition">
                 ⬆ Convert to E Standard</button>`
             : '';
-        const fmtBadge = formatBadge(s.format, s.stem_count);
-        const ariaLabel = `Play ${title || s.filename}${artist ? ' by ' + artist : ''}`;
-        return `<div class="song-card group" data-play="${encodeURIComponent(s.filename)}" data-artist="${_escAttr(artist || '')}" tabindex="0" role="button" aria-label="${_escAttr(ariaLabel)}">
+        const fmtBadge = formatBadge(song.format, song.stem_count);
+        const syncBtn = !localFilename ? _librarySyncButton(providerId, songId, 'mt-2 w-full px-2 py-1.5') : '';
+        const actionButtons = isLocalProvider && localFilename
+            ? `${editBtn(song)}${heartBtn(localFilename, song.favorite)}`
+            : '';
+        const entryAttrs = localFilename
+            ? `data-play="${encodeURIComponent(localFilename)}"`
+            : `data-library-provider="${encodeURIComponent(providerId)}" data-library-song="${encodeURIComponent(songId)}"`;
+        const ariaAction = localFilename ? 'Play' : 'Sync';
+        const ariaLabel = `${ariaAction} ${title || _libraryDisplayFilename(song, providerId)}${artist ? ' by ' + artist : ''}`;
+        const artHtml = artUrl
+            ? `<img src="${artUrl}" alt="" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+                <span class="placeholder" style="display:none">🎸</span>`
+            : `<span class="placeholder" style="display:flex">🎸</span>`;
+        return `<div class="song-card group" ${entryAttrs} data-artist="${_escAttr(artist || '')}" tabindex="0" role="button" aria-label="${_escAttr(ariaLabel)}">
             <div class="card-art">
-                <img src="${artUrl}" alt="" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
-                <span class="placeholder" style="display:none">🎸</span>
+                ${artHtml}
                 ${fmtBadge}
             </div>
             <div class="p-4">
@@ -1490,24 +1670,24 @@ function renderGridCards(songs, containerId = 'lib-grid', mode = 'replace') {
                         <p class="text-xs text-gray-500 truncate mt-0.5">${esc(artist)}</p>
                     </div>
                     <div class="flex gap-1">
-                        ${editBtn(s)}
-                        ${heartBtn(s.filename, s.favorite)}
+                        ${actionButtons}
                     </div>
                 </div>
                 <div class="flex items-center flex-wrap gap-1.5 mt-3 text-xs">
-                    ${(s.arrangements || []).map(a =>
+                    ${(song.arrangements || []).map(arrangement =>
                         `<span class="px-1.5 py-0.5 rounded ${
-                            a.name === 'Lead' ? 'bg-red-900/40 text-red-300' :
-                            a.name === 'Rhythm' ? 'bg-blue-900/40 text-blue-300' :
-                            a.name === 'Bass' ? 'bg-green-900/40 text-green-300' :
+                            arrangement.name === 'Lead' ? 'bg-red-900/40 text-red-300' :
+                            arrangement.name === 'Rhythm' ? 'bg-blue-900/40 text-blue-300' :
+                            arrangement.name === 'Bass' ? 'bg-green-900/40 text-green-300' :
                             'bg-dark-600 text-gray-400'
-                        }">${a.name}</span>`
+                        }">${arrangement.name}</span>`
                     ).join('')}
                     ${tuning ? `<span class="px-1.5 py-0.5 rounded ${tuning === 'E Standard' ? 'bg-green-900/30 text-green-400' : 'bg-yellow-900/30 text-yellow-400'}">${tuning}</span>` : ''}
-                    ${s.has_lyrics ? `<span class="px-1.5 py-0.5 bg-purple-900/30 rounded text-purple-300">Lyrics</span>` : ''}
+                    ${song.has_lyrics ? `<span class="px-1.5 py-0.5 bg-purple-900/30 rounded text-purple-300">Lyrics</span>` : ''}
                     ${duration ? `<span class="text-gray-600">${duration}</span>` : ''}
                 </div>
                 ${retuneBtn}
+                ${syncBtn}
             </div>
         </div>`;
     }).join('');
@@ -1548,6 +1728,7 @@ async function loadTreeView() {
         const sp = new URLSearchParams();
         if (q) sp.set('q', q);
         if (format) sp.set('format', format);
+        _applyLibraryProviderToParams(sp);
         _applyLibFiltersToParams(sp);
         const qs = sp.toString();
         const resp = await fetch(`/api/library/stats${qs ? '?' + qs : ''}`);
@@ -1563,6 +1744,7 @@ const TREE_PAGE_SIZE = 50;
 async function renderTreeInto(containerId, countId, stats, letter, q, favoritesOnly, page) {
     if (page === undefined) page = favoritesOnly ? _favTreePage || 0 : _treePage;
     const container = document.getElementById(containerId);
+    const screenProviderId = favoritesOnly ? 'local' : _activeLibraryProviderId();
     const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ#'.split('');
     const chevron = `<svg class="chevron w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>`;
 
@@ -1588,6 +1770,7 @@ async function renderTreeInto(containerId, countId, stats, letter, q, favoritesO
     if (letter) params.set('letter', letter);
     if (q) params.set('q', q);
     if (favoritesOnly) params.set('favorites', '1');
+    else _applyLibraryProviderToParams(params);
     const format = (document.getElementById('lib-format') || {}).value || '';
     if (format) params.set('format', format);
     if (!favoritesOnly) _applyLibFiltersToParams(params);
@@ -1630,7 +1813,10 @@ async function renderTreeInto(containerId, countId, stats, letter, q, favoritesO
         html += `</div><div class="artist-body">`;
 
         for (const album of artist.albums) {
-            const artUrl = `/api/song/${encodeURIComponent(album.songs[0].filename)}/art${album.songs[0].mtime ? `?v=${Math.floor(album.songs[0].mtime)}` : ''}`;
+            const albumSongs = Array.isArray(album.songs) ? album.songs : [];
+            const artSong = albumSongs[0] || {};
+            const artProviderId = _libraryProviderIdForSong(artSong, screenProviderId);
+            const artUrl = _librarySongArtUrl(artSong, artProviderId);
             const albumHeuristicOpen = q || artist.albums.length === 1;
             const albumIsOpen = forceArtistOpen ? true : forceArtistClosed ? false : albumHeuristicOpen;
             const albumOpen = albumIsOpen ? ' open' : '';
@@ -1638,40 +1824,52 @@ async function renderTreeInto(containerId, countId, stats, letter, q, favoritesO
             html += `<div class="album-group${albumOpen}">`;
             html += `<div class="album-header" tabindex="0" role="button" aria-expanded="${albumIsOpen ? 'true' : 'false'}" aria-label="${albumAria}" onclick="_onHeaderClick(this)">`;
             html += chevron;
-            html += `<img src="${artUrl}" alt="" class="album-art-sm" loading="lazy" onerror="this.style.display='none'">`;
+            if (artUrl) html += `<img src="${artUrl}" alt="" class="album-art-sm" loading="lazy" onerror="this.style.display='none'">`;
             html += `<span class="text-gray-300 text-sm flex-1">${esc(album.name)}</span>`;
-            html += `<span class="text-xs text-gray-600">${album.songs.length}</span>`;
+            html += `<span class="text-xs text-gray-600">${albumSongs.length}</span>`;
             html += `</div><div class="album-body">`;
 
-            for (const s of album.songs) {
-                const title = s.title || s.filename;
-                const duration = s.duration ? formatTime(s.duration) : '';
-                const tuning = s.tuning || '';
-                const isSloppak = s.format === 'sloppak';
-                const stdRetune = !isSloppak && tuning && !s.has_estd &&
+            for (const song of albumSongs) {
+                const providerId = _libraryProviderIdForSong(song, screenProviderId);
+                const localFilename = _libraryLocalFilename(song, providerId);
+                const songId = _librarySongId(song);
+                const title = _librarySongTitle(song, providerId);
+                const duration = song.duration ? formatTime(song.duration) : '';
+                const tuning = song.tuning || '';
+                const isLocalProvider = _isLocalLibraryProvider(providerId);
+                const isSloppak = song.format === 'sloppak';
+                const stdRetune = isLocalProvider && localFilename && !isSloppak && tuning && !song.has_estd &&
                     ['Eb Standard', 'D Standard', 'C# Standard', 'C Standard'].includes(tuning);
-                const rowAria = _escAttr(`Play ${title}${artist.name ? ' by ' + artist.name : ''}`);
-                html += `<div class="song-row" data-play="${encodeURIComponent(s.filename)}" data-artist="${_escAttr(artist.name || '')}" tabindex="0" role="button" aria-label="${rowAria}">`;
-                html += `<div class="flex-1 min-w-0 flex items-center gap-2"><span class="text-sm text-white truncate block">${esc(title)}</span>${formatBadgeInline(s.format, s.stem_count)}</div>`;
+                const rowAttrs = localFilename
+                    ? `data-play="${encodeURIComponent(localFilename)}"`
+                    : `data-library-provider="${encodeURIComponent(providerId)}" data-library-song="${encodeURIComponent(songId)}"`;
+                const ariaAction = localFilename ? 'Play' : 'Sync';
+                const rowAria = _escAttr(`${ariaAction} ${title}${artist.name ? ' by ' + artist.name : ''}`);
+                html += `<div class="song-row" ${rowAttrs} data-artist="${_escAttr(artist.name || '')}" tabindex="0" role="button" aria-label="${rowAria}">`;
+                html += `<div class="flex-1 min-w-0 flex items-center gap-2"><span class="text-sm text-white truncate block">${esc(title)}</span>${formatBadgeInline(song.format, song.stem_count)}</div>`;
                 html += `<div class="flex items-center gap-1.5 flex-shrink-0 text-xs">`;
-                for (const a of (s.arrangements || [])) {
-                    const cls = a.name === 'Lead' ? 'bg-red-900/40 text-red-300' :
-                                a.name === 'Rhythm' ? 'bg-blue-900/40 text-blue-300' :
-                                a.name === 'Bass' ? 'bg-green-900/40 text-green-300' :
+                for (const arrangement of (song.arrangements || [])) {
+                    const cls = arrangement.name === 'Lead' ? 'bg-red-900/40 text-red-300' :
+                                arrangement.name === 'Rhythm' ? 'bg-blue-900/40 text-blue-300' :
+                                arrangement.name === 'Bass' ? 'bg-green-900/40 text-green-300' :
                                 'bg-dark-600 text-gray-400';
-                    html += `<span class="px-1.5 py-0.5 rounded ${cls}">${a.name}</span>`;
+                    html += `<span class="px-1.5 py-0.5 rounded ${cls}">${arrangement.name}</span>`;
                 }
                 if (tuning)
                     html += `<span class="px-1.5 py-0.5 rounded ${tuning === 'E Standard' ? 'bg-green-900/30 text-green-400' : 'bg-yellow-900/30 text-yellow-400'}">${tuning}</span>`;
-                if (s.has_lyrics)
+                if (song.has_lyrics)
                     html += `<span class="px-1.5 py-0.5 bg-purple-900/30 rounded text-purple-300">Lyrics</span>`;
                 if (duration)
                     html += `<span class="text-gray-600 w-10 text-right">${duration}</span>`;
                 if (stdRetune)
-                    html += `<button data-retune="${encodeURIComponent(s.filename)}" data-title="${encodeURIComponent(title)}" data-tuning="${tuning}" data-target="E Standard"
+                    html += `<button data-retune="${encodeURIComponent(localFilename)}" data-title="${encodeURIComponent(title)}" data-tuning="${tuning}" data-target="E Standard"
                         class="retune-btn px-1.5 py-0.5 bg-gold/10 hover:bg-gold/20 border border-gold/20 rounded text-gold" title="Convert to E Standard">E</button>`;
-                html += editBtn(s);
-                html += heartBtn(s.filename, s.favorite);
+                if (isLocalProvider && localFilename) {
+                    html += editBtn(song);
+                    html += heartBtn(localFilename, song.favorite);
+                } else if (!localFilename) {
+                    html += _librarySyncButton(providerId, songId, 'px-2 py-1');
+                }
                 html += `</div></div>`;
             }
             html += `</div></div>`;
@@ -5456,6 +5654,39 @@ function _removeLibCardsForFilename(filename) {
     _bumpLibNavGeneration();
 }
 
+async function syncLibrarySong(providerId, songId, button, { playWhenReady = false } = {}) {
+    if (!providerId || !songId) return;
+    const originalText = button ? button.textContent : '';
+    if (button) {
+        button.disabled = true;
+        button.textContent = 'Syncing...';
+    }
+    try {
+        const response = await fetch(
+            `/api/library/providers/${encodeURIComponent(providerId)}/songs/${encodeURIComponent(songId)}/sync`,
+            { method: 'POST' },
+        );
+        let data = {};
+        try { data = await response.json(); } catch { data = {}; }
+        if (!response.ok) throw new Error(data.detail || data.error || `HTTP ${response.status}`);
+        const localFilename = data.filename || data.localFilename || data.local_filename || data.playFilename || data.play_filename || '';
+        if (button) button.textContent = 'Synced';
+        _treeStats = null;
+        _favTreeStats = null;
+        _tuningNames = null;
+        await loadLibrary(0);
+        if (playWhenReady && localFilename) playSong(localFilename);
+        return data;
+    } catch (error) {
+        if (button) {
+            button.disabled = false;
+            button.textContent = originalText || 'Sync';
+        }
+        alert(`Sync failed: ${error.message}`);
+        return null;
+    }
+}
+
 // Delegated click handlers
 document.addEventListener('click', e => {
     // Edit button
@@ -5478,6 +5709,31 @@ document.addEventListener('click', e => {
     if (btn) {
         e.stopPropagation();
         retuneSong(btn.dataset.retune, decodeURIComponent(btn.dataset.title), btn.dataset.tuning, btn.dataset.target || 'E Standard');
+        return;
+    }
+    // Remote library sync button
+    const syncBtn = e.target.closest('.library-sync-btn');
+    if (syncBtn) {
+        e.stopPropagation();
+        syncLibrarySong(
+            decodeURIComponent(syncBtn.dataset.librarySyncProvider || ''),
+            decodeURIComponent(syncBtn.dataset.librarySyncSong || ''),
+            syncBtn,
+        );
+        return;
+    }
+    // Remote song card / row without a local playable file yet.
+    const remoteEntry = e.target.closest('[data-library-song]');
+    if (remoteEntry && !remoteEntry.dataset.play && !e.target.closest('button')) {
+        const providerId = decodeURIComponent(remoteEntry.dataset.libraryProvider || '');
+        if (!_providerSupports(providerId, 'song.sync')) return;
+        _setLibSelection(remoteEntry, { focus: false });
+        syncLibrarySong(
+            providerId,
+            decodeURIComponent(remoteEntry.dataset.librarySong || ''),
+            remoteEntry.querySelector('.library-sync-btn'),
+            { playWhenReady: true },
+        );
         return;
     }
     // Song card / row — keep persistent selection in sync with mouse
@@ -6100,6 +6356,7 @@ async function bootstrapPluginsAndUi() {
         try { await showScreen('player'); }
         catch (e) { console.warn('[slopsmith] follower-window: showScreen("player") failed:', e); }
     }
+    await loadLibraryProviders({ restoreSaved: true });
     // Restore library-filter UI state from localStorage before the first
     // grid fetch so the badge/chips are accurate immediately
     // (slopsmith#129).
@@ -6133,6 +6390,7 @@ async function bootstrapPluginsAndUi() {
     checkScanAndLoad();
 
     const plugins = await bootstrapPluginsAndUi();
+    await loadLibraryProviders({ restoreSaved: true, reloadOnChange: true });
     // Viz picker depends on plugin scripts having loaded (to find
     // window.slopsmithViz_<id> factories), so run it after loadPlugins.
     // Reuse the plugin list loadPlugins just fetched — no need to

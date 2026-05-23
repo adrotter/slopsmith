@@ -2065,18 +2065,20 @@ function setupAppUpdates() {
         // Wire DOM listeners once. The elements live in static index.html
         // and are not recreated, so re-wiring on every loadSettings() call
         // would just stack duplicate handlers.
-        channelSelect.addEventListener('change', () => {
+        channelSelect.addEventListener('change', async () => {
             const val = channelSelect.value;
             if (!APP_UPDATE_CHANNELS.includes(val)) return;
             try { localStorage.setItem('slopsmith-update-channel', val); } catch (_) {}
             try {
-                void Promise.resolve(updateApi.setChannel(val)).catch((e) => {
-                    console.warn('[updater] setChannel failed:', e);
-                });
+                // Await setChannel so the status line reflects what actually
+                // happened — rendering "Channel set" unconditionally would
+                // mislead users when the IPC rejects.
+                await Promise.resolve(updateApi.setChannel(val));
+                renderStatus(`Channel set to ${val}.`);
             } catch (e) {
-                console.warn('[updater] setChannel threw:', e);
+                console.warn('[updater] setChannel failed:', e);
+                renderStatus(`Failed to set channel to ${val}: ${e?.message || e}`);
             }
-            renderStatus(`Channel set to ${val}.`);
         });
 
         checkBtn.addEventListener('click', async () => {

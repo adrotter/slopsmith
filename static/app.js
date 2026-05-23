@@ -1823,9 +1823,9 @@ function renderGridCards(songs, containerId = 'lib-grid', mode = 'replace') {
                             arrangement.name === 'Rhythm' ? 'bg-blue-900/40 text-blue-300' :
                             arrangement.name === 'Bass' ? 'bg-green-900/40 text-green-300' :
                             'bg-dark-600 text-gray-400'
-                        }">${arrangement.name}</span>`
+                        }">${esc(arrangement.name)}</span>`
                     ).join('')}
-                    ${tuning ? `<span class="px-1.5 py-0.5 rounded ${tuning === 'E Standard' ? 'bg-green-900/30 text-green-400' : 'bg-yellow-900/30 text-yellow-400'}">${tuning}</span>` : ''}
+                    ${tuning ? `<span class="px-1.5 py-0.5 rounded ${tuning === 'E Standard' ? 'bg-green-900/30 text-green-400' : 'bg-yellow-900/30 text-yellow-400'}">${esc(tuning)}</span>` : ''}
                     ${song.has_lyrics ? `<span class="px-1.5 py-0.5 bg-purple-900/30 rounded text-purple-300">Lyrics</span>` : ''}
                     ${duration ? `<span class="text-gray-600">${duration}</span>` : ''}
                 </div>
@@ -2019,10 +2019,10 @@ async function renderTreeInto(containerId, countId, stats, letter, q, favoritesO
                                 arrangement.name === 'Rhythm' ? 'bg-blue-900/40 text-blue-300' :
                                 arrangement.name === 'Bass' ? 'bg-green-900/40 text-green-300' :
                                 'bg-dark-600 text-gray-400';
-                    html += `<span class="px-1.5 py-0.5 rounded ${cls}">${arrangement.name}</span>`;
+                    html += `<span class="px-1.5 py-0.5 rounded ${cls}">${esc(arrangement.name)}</span>`;
                 }
                 if (tuning)
-                    html += `<span class="px-1.5 py-0.5 rounded ${tuning === 'E Standard' ? 'bg-green-900/30 text-green-400' : 'bg-yellow-900/30 text-yellow-400'}">${tuning}</span>`;
+                    html += `<span class="px-1.5 py-0.5 rounded ${tuning === 'E Standard' ? 'bg-green-900/30 text-green-400' : 'bg-yellow-900/30 text-yellow-400'}">${esc(tuning)}</span>`;
                 if (song.has_lyrics)
                     html += `<span class="px-1.5 py-0.5 bg-purple-900/30 rounded text-purple-300">Lyrics</span>`;
                 if (duration)

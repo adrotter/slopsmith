@@ -871,10 +871,25 @@ def _call_library_provider(provider: object, method_name: str, **kwargs) -> Any:
 
 
 async def _call_library_provider_async(provider: object, method_name: str, **kwargs) -> Any:
-    result = _call_library_provider(provider, method_name, **kwargs)
-    if inspect.isawaitable(result):
-        result = await result
-    return result
+    method = library_providers.provider_method(provider, method_name)
+    if inspect.iscoroutinefunction(method):
+        # Async provider method — call directly on the event loop.
+        try:
+            return await method(**kwargs)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            provider_id = library_providers.provider_id(provider)
+            provider_kind = str(library_providers.provider_field(provider, "kind", "") or "")
+            if provider_kind == "remote":
+                detail = f"This source appears to be offline ({provider_id})."
+                message = str(exc).strip()
+                if message:
+                    detail = f"{detail} {message}"
+                raise HTTPException(status_code=503, detail=detail) from exc
+            raise
+    # Synchronous provider method — run in a threadpool so the event loop stays free.
+    return await run_in_threadpool(_call_library_provider, provider, method_name, **kwargs)
 
 
 def _library_art_response(result: Any) -> Response:
@@ -2487,16 +2502,16 @@ async def sync_library_provider_song(provider_id: str, song_id: str):
 
 
 @app.get("/api/library")
-def list_library(q: str = "", page: int = 0, size: int = 24, sort: str = "artist",
-                 dir: str = "asc", favorites: int = 0, format: str = "",
-                 arrangements_has: str = "", arrangements_lacks: str = "",
-                 stems_has: str = "", stems_lacks: str = "",
-                 has_lyrics: str = "", tunings: str = "", provider: str = "local"):
+async def list_library(q: str = "", page: int = 0, size: int = 24, sort: str = "artist",
+                       dir: str = "asc", favorites: int = 0, format: str = "",
+                       arrangements_has: str = "", arrangements_lacks: str = "",
+                       stems_has: str = "", stems_lacks: str = "",
+                       has_lyrics: str = "", tunings: str = "", provider: str = "local"):
     """Paginated library search through the selected library provider."""
     size = min(size, 100)
     library_provider = _get_library_provider(provider)
     _require_library_provider_capability(library_provider, "library.read")
-    songs, total = _call_library_provider(
+    songs, total = await _call_library_provider_async(
         library_provider,
         "query_page",
         page=page,
@@ -2514,15 +2529,15 @@ def list_library(q: str = "", page: int = 0, size: int = 24, sort: str = "artist
 
 
 @app.get("/api/library/artists")
-def list_artists(letter: str = "", q: str = "", favorites: int = 0, page: int = 0, size: int = 50,
-                 format: str = "",
-                 arrangements_has: str = "", arrangements_lacks: str = "",
-                 stems_has: str = "", stems_lacks: str = "",
-                 has_lyrics: str = "", tunings: str = "", provider: str = "local"):
+async def list_artists(letter: str = "", q: str = "", favorites: int = 0, page: int = 0,
+                       size: int = 50, format: str = "",
+                       arrangements_has: str = "", arrangements_lacks: str = "",
+                       stems_has: str = "", stems_lacks: str = "",
+                       has_lyrics: str = "", tunings: str = "", provider: str = "local"):
     """Get artists grouped by letter with albums and songs (for tree view)."""
     library_provider = _get_library_provider(provider)
     _require_library_provider_capability(library_provider, "library.read")
-    artists, total = _call_library_provider(
+    artists, total = await _call_library_provider_async(
         library_provider,
         "query_artists",
         letter=letter,
@@ -2539,15 +2554,15 @@ def list_artists(letter: str = "", q: str = "", favorites: int = 0, page: int = 
 
 
 @app.get("/api/library/stats")
-def library_stats(favorites: int = 0, q: str = "", format: str = "",
-                  arrangements_has: str = "", arrangements_lacks: str = "",
-                  stems_has: str = "", stems_lacks: str = "",
-                  has_lyrics: str = "", tunings: str = "", provider: str = "local"):
+async def library_stats(favorites: int = 0, q: str = "", format: str = "",
+                        arrangements_has: str = "", arrangements_lacks: str = "",
+                        stems_has: str = "", stems_lacks: str = "",
+                        has_lyrics: str = "", tunings: str = "", provider: str = "local"):
     """Aggregate stats for the UI. Accepts the same filter params as
     /api/library so the letter bar mirrors the active grid filter set."""
     library_provider = _get_library_provider(provider)
     _require_library_provider_capability(library_provider, "library.read")
-    return _call_library_provider(
+    return await _call_library_provider_async(
         library_provider,
         "query_stats",
         **_library_filter_args(
@@ -2560,14 +2575,14 @@ def library_stats(favorites: int = 0, q: str = "", format: str = "",
 
 
 @app.get("/api/library/tuning-names")
-def list_tuning_names(provider: str = "local"):
+async def list_tuning_names(provider: str = "local"):
     """Distinct tuning names present in the library, with per-tuning
     counts. Powers the tuning multi-select. Sorted by `tuning_sort_key`
     so names appear in the same musical order the sort uses
     (slopsmith#22) — E Standard first, then nearest neighbors."""
     library_provider = _get_library_provider(provider)
     _require_library_provider_capability(library_provider, "library.read")
-    return _call_library_provider(library_provider, "tuning_names")
+    return await _call_library_provider_async(library_provider, "tuning_names")
 
 
 @app.post("/api/favorites/toggle")

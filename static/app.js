@@ -1085,10 +1085,14 @@ async function loadLibraryProviders({ restoreSaved = false, reloadOnChange = fal
     const savedProviderId = restoreSaved ? _readPersistedLibraryProvider() : _selectedLibraryProviderId;
     const hasSavedProvider = !!_providerById(savedProviderId);
     const hasSelectedProvider = !!_providerById(_selectedLibraryProviderId);
-    if (hasSavedProvider) _selectedLibraryProviderId = savedProviderId;
-    else if (!hasSelectedProvider) {
+    if (hasSavedProvider) {
+        _selectedLibraryProviderId = savedProviderId;
+    } else if (!hasSelectedProvider) {
+        // The saved/selected provider is not in the current list — it may not have been
+        // registered yet (e.g. plugins haven't loaded on first call). Fall back to local
+        // in-memory but do NOT overwrite localStorage: a second call after plugins load
+        // will restore the correct selection from the persisted value.
         _selectedLibraryProviderId = 'local';
-        if (restoreSaved) _writePersistedChoice(_LIB_PROVIDER_KEY, 'local');
     }
 
     _renderLibraryProviderSelector();

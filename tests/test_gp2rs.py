@@ -699,7 +699,7 @@ def test_two_normal_notes_on_same_string_are_both_emitted():
 
 
 # ── convert_piano_track: tied-note pitch-bucket collision ─────────────────────
-# MIDI notes 48 (C4) and 50 (D4) both map to rs_string=2. A chord containing
+# MIDI notes 48 (C3) and 50 (D3) both map to rs_string=2. A chord containing
 # both, followed by ties for both, must extend each note individually — not
 # share a single rs_string=2 bucket that only tracks whichever was stored last.
 
@@ -708,8 +708,8 @@ def _piano_song(beats):
     voice = SimpleNamespace(beats=beats)
     measure = SimpleNamespace(voices=[voice])
     strings = [
-        SimpleNamespace(number=1, value=48),  # C4 — encodes to rs_string=2, rs_fret=0
-        SimpleNamespace(number=2, value=50),  # D4 — encodes to rs_string=2, rs_fret=2
+        SimpleNamespace(number=1, value=48),  # C3 — encodes to rs_string=2, rs_fret=0
+        SimpleNamespace(number=2, value=50),  # D3 — encodes to rs_string=2, rs_fret=2
     ]
     track = SimpleNamespace(
         strings=strings,

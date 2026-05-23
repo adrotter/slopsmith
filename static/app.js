@@ -1812,7 +1812,7 @@ function renderGridCards(songs, containerId = 'lib-grid', mode = 'replace') {
         const stdRetune = isLocalProvider && localFilename && !isSloppak && tuning && !song.has_estd &&
             ['Eb Standard', 'D Standard', 'C# Standard', 'C Standard'].includes(tuning);
         const retuneBtn = stdRetune
-            ? `<button data-retune="${encodeURIComponent(localFilename)}" data-title="${encodeURIComponent(title)}" data-tuning="${tuning}" data-target="E Standard"
+            ? `<button data-retune="${encodeURIComponent(localFilename)}" data-title="${encodeURIComponent(title)}" data-tuning="${_escAttr(tuning)}" data-target="E Standard"
                 class="retune-btn mt-2 w-full px-2 py-1.5 bg-gold/10 hover:bg-gold/20 border border-gold/20 rounded-lg text-xs font-medium text-gold transition">
                 ⬆ Convert to E Standard</button>`
             : '';
@@ -2072,7 +2072,7 @@ async function renderTreeInto(containerId, countId, stats, letter, q, favoritesO
                 if (duration)
                     html += `<span class="text-gray-600 w-10 text-right">${duration}</span>`;
                 if (stdRetune)
-                    html += `<button data-retune="${encodeURIComponent(localFilename)}" data-title="${encodeURIComponent(title)}" data-tuning="${tuning}" data-target="E Standard"
+                    html += `<button data-retune="${encodeURIComponent(localFilename)}" data-title="${encodeURIComponent(title)}" data-tuning="${_escAttr(tuning)}" data-target="E Standard"
                         class="retune-btn px-1.5 py-0.5 bg-gold/10 hover:bg-gold/20 border border-gold/20 rounded text-gold" title="Convert to E Standard">E</button>`;
                 if (isLocalProvider && localFilename) {
                     html += editBtn(song);

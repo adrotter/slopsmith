@@ -938,9 +938,23 @@ def _call_library_provider(provider: object, method_name: str, **kwargs) -> Any:
         raise
 
 
+def _is_async_callable(obj: object) -> bool:
+    """Return True if obj is an async function or a callable object with an async __call__.
+
+    ``inspect.iscoroutinefunction`` only recognises bare coroutine functions; it returns
+    False for class instances whose ``__call__`` method is defined as ``async def``.
+    Checking both handles the common plugin pattern of wrapping an async method in a
+    callable object.
+    """
+    if inspect.iscoroutinefunction(obj):
+        return True
+    _call = getattr(obj, "__call__", None)
+    return _call is not None and inspect.iscoroutinefunction(_call)
+
+
 async def _call_library_provider_async(provider: object, method_name: str, **kwargs) -> Any:
     method = library_providers.provider_method(provider, method_name)
-    if inspect.iscoroutinefunction(method):
+    if _is_async_callable(method):
         # Async provider method — call directly on the event loop.
         try:
             return await method(**kwargs)

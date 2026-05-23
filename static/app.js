@@ -5873,10 +5873,14 @@ function _setLibrarySyncState(providerId, songId, state) {
 
 function _renderLibrarySyncState(providerId, songId) {
     const state = _librarySyncState(providerId, songId);
-    const providerAttr = CSS.escape(encodeURIComponent(providerId));
-    const songAttr = CSS.escape(encodeURIComponent(songId));
-    const statusSelector = `[data-library-sync-status][data-library-sync-provider="${providerAttr}"][data-library-sync-song="${songAttr}"]`;
-    for (const status of document.querySelectorAll(statusSelector)) {
+    // Filter via dataset rather than building a CSS attribute selector —
+    // CSS.escape is absent in some test environments and older runtimes,
+    // and provider/song IDs are not constrained to CSS-safe strings.
+    const encodedProvider = encodeURIComponent(providerId);
+    const encodedSong = encodeURIComponent(songId);
+    for (const status of document.querySelectorAll('[data-library-sync-status]')) {
+        if (status.dataset.librarySyncProvider !== encodedProvider) continue;
+        if (status.dataset.librarySyncSong !== encodedSong) continue;
         const layout = status.classList.contains('ml-1') ? 'inline' : 'block';
         status.className = _librarySyncStatusClass(state, layout);
         status.textContent = _librarySyncStatusText(state);

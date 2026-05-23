@@ -602,7 +602,7 @@ def _ct_beat(tick, dur_value, notes):
             tuplet=SimpleNamespace(enters=1, times=1),
         ),
         notes=notes,
-        effect=SimpleNamespace(mixTableChange=None),
+        effect=SimpleNamespace(mixTableChange=None, chord=None),
     )
 
 

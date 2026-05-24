@@ -1273,7 +1273,12 @@ let _libEpoch = 0;
 // + Rhythm = "has Lead OR Rhythm"); cross-axis is AND. Tri-state pills
 // translate to `_has` / `_lacks` lists on the wire so the server's
 // SQL doesn't have to encode the third "any" state.
-const _ARRANGEMENTS = ['Lead', 'Rhythm', 'Bass', 'Combo'];
+// In smart mode Combo is subsumed into Lead; only show Lead/Rhythm/Bass.
+// In legacy mode keep the original four values.
+function _getArrangements() {
+    const mode = localStorage.getItem('arrangementNamingMode') ?? 'smart';
+    return mode === 'smart' ? ['Lead', 'Rhythm', 'Bass'] : ['Lead', 'Rhythm', 'Bass', 'Combo'];
+}
 // Stem ids match the bare strings sloppak manifests use ("drums",
 // "bass", etc.). `full` is intentionally omitted from the filter UI:
 // it's the fallback mix every sloppak ships with, so filtering by it
@@ -1350,6 +1355,7 @@ function _libActiveCount() {
 }
 
 function _applyLibFiltersToParams(params) {
+    params.set('naming_mode', localStorage.getItem('arrangementNamingMode') ?? 'smart');
     if (_libFilters.arrHas.length) params.set('arrangements_has', _libFilters.arrHas.join(','));
     if (_libFilters.arrLacks.length) params.set('arrangements_lacks', _libFilters.arrLacks.join(','));
     if (_libFilters.stemsHas.length) params.set('stems_has', _libFilters.stemsHas.join(','));
@@ -1510,7 +1516,7 @@ function _updateLibFiltersBadge() {
 }
 
 function _renderLibFilterDrawer() {
-    _renderPillRow('filter-arrangements', _ARRANGEMENTS, 'arrHas', 'arrLacks');
+    _renderPillRow('filter-arrangements', _getArrangements(), 'arrHas', 'arrLacks');
     _renderPillRow('filter-stems', _STEM_DEFS, 'stemsHas', 'stemsLacks', s => s.label);
     _renderLyricsPill();
     // Stems section dimmed when format=psarc (no stems exist).
@@ -1857,14 +1863,16 @@ function renderGridCards(songs, containerId = 'lib-grid', mode = 'replace') {
                     </div>
                 </div>
                 <div class="flex items-center flex-wrap gap-1.5 mt-3 text-xs">
-                    ${(song.arrangements || []).map(arrangement =>
-                        `<span class="px-1.5 py-0.5 rounded ${
-                            arrangement.name === 'Lead' ? 'bg-red-900/40 text-red-300' :
-                            arrangement.name === 'Rhythm' ? 'bg-blue-900/40 text-blue-300' :
-                            arrangement.name === 'Bass' ? 'bg-green-900/40 text-green-300' :
-                            'bg-dark-600 text-gray-400'
-                        }">${esc(arrangement.name)}</span>`
-                    ).join('')}
+                    ${(song.arrangements || []).map(arrangement => {
+                        const _nm = localStorage.getItem('arrangementNamingMode') ?? 'smart';
+                        const _label = (_nm === 'smart' && arrangement.smart_name) ? arrangement.smart_name : arrangement.name;
+                        const _type = (arrangement.smart_name || arrangement.name || '').split(' ').pop();
+                        const _cls = _label.includes('Lead') ? 'bg-red-900/40 text-red-300' :
+                                     _label.includes('Rhythm') ? 'bg-blue-900/40 text-blue-300' :
+                                     _label.includes('Bass') ? 'bg-green-900/40 text-green-300' :
+                                     'bg-dark-600 text-gray-400';
+                        return `<span class="px-1.5 py-0.5 rounded ${_cls}">${esc(_label)}</span>`;
+                    }).join('')}
                     ${tuning ? `<span class="px-1.5 py-0.5 rounded ${tuning === 'E Standard' ? 'bg-green-900/30 text-green-400' : 'bg-yellow-900/30 text-yellow-400'}">${esc(tuning)}</span>` : ''}
                     ${song.has_lyrics ? `<span class="px-1.5 py-0.5 bg-purple-900/30 rounded text-purple-300">Lyrics</span>` : ''}
                     ${duration ? `<span class="text-gray-600">${duration}</span>` : ''}
@@ -2059,11 +2067,13 @@ async function renderTreeInto(containerId, countId, stats, letter, q, favoritesO
                 html += `<div class="flex-1 min-w-0 flex items-center gap-2"><span class="text-sm text-white truncate block">${esc(title)}</span>${formatBadgeInline(song.format, song.stem_count)}</div>`;
                 html += `<div class="flex items-center gap-1.5 flex-shrink-0 text-xs">`;
                 for (const arrangement of (song.arrangements || [])) {
-                    const cls = arrangement.name === 'Lead' ? 'bg-red-900/40 text-red-300' :
-                                arrangement.name === 'Rhythm' ? 'bg-blue-900/40 text-blue-300' :
-                                arrangement.name === 'Bass' ? 'bg-green-900/40 text-green-300' :
-                                'bg-dark-600 text-gray-400';
-                    html += `<span class="px-1.5 py-0.5 rounded ${cls}">${esc(arrangement.name)}</span>`;
+                    const _nm = localStorage.getItem('arrangementNamingMode') ?? 'smart';
+                    const _label = (_nm === 'smart' && arrangement.smart_name) ? arrangement.smart_name : arrangement.name;
+                    const _cls = _label.includes('Lead') ? 'bg-red-900/40 text-red-300' :
+                                 _label.includes('Rhythm') ? 'bg-blue-900/40 text-blue-300' :
+                                 _label.includes('Bass') ? 'bg-green-900/40 text-green-300' :
+                                 'bg-dark-600 text-gray-400';
+                    html += `<span class="px-1.5 py-0.5 rounded ${_cls}">${esc(_label)}</span>`;
                 }
                 if (tuning)
                     html += `<span class="px-1.5 py-0.5 rounded ${tuning === 'E Standard' ? 'bg-green-900/30 text-green-400' : 'bg-yellow-900/30 text-yellow-400'}">${esc(tuning)}</span>`;
@@ -2352,6 +2362,9 @@ async function loadSettings() {
     setAvOffsetMs(Number(data.av_offset_ms) || 0, /* skipPersist */ true);
     const psarcPlatformEl = document.getElementById('psarc-platform');
     if (psarcPlatformEl) psarcPlatformEl.value = data.psarc_platform || 'both';
+    // Arrangement naming mode is localStorage-only (client preference).
+    const namingModeEl = document.getElementById('arrangement-naming-mode');
+    if (namingModeEl) namingModeEl.value = localStorage.getItem('arrangementNamingMode') ?? 'smart';
     // Native folder picker — only present when running inside slopsmith-desktop.
     if (window.slopsmithDesktop && typeof window.slopsmithDesktop.pickDirectory === 'function') {
         document.getElementById('btn-pick-dlc')?.classList.remove('hidden');
@@ -4424,8 +4437,10 @@ async function playSong(filename, arrangement) {
     await new Promise(r => setTimeout(r, 500));
     highway.init(document.getElementById('highway'));
 
-    const arrParam = arrangement !== undefined ? `?arrangement=${arrangement}` : '';
-    const wsUrl = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/highway/${decodeURIComponent(filename)}${arrParam}`;
+    const wsParams = new URLSearchParams();
+    if (arrangement !== undefined) wsParams.set('arrangement', arrangement);
+    wsParams.set('naming_mode', localStorage.getItem('arrangementNamingMode') ?? 'smart');
+    const wsUrl = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/highway/${decodeURIComponent(filename)}?${wsParams.toString()}`;
     highway.connect(wsUrl);
     loadSavedLoops();
     document.getElementById('quality-select').value = highway.getRenderScale();

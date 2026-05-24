@@ -2467,7 +2467,11 @@ function createHighway() {
                             } else {
                                 document.getElementById('hud-artist').textContent = msg.artist;
                                 document.getElementById('hud-title').textContent = msg.title;
-                                document.getElementById('hud-arrangement').textContent = msg.arrangement;
+                                const namingMode = localStorage.getItem('arrangementNamingMode') ?? 'smart';
+                                const arrLabel = (namingMode === 'smart' && msg.arrangement_smart_name)
+                                    ? msg.arrangement_smart_name
+                                    : msg.arrangement;
+                                document.getElementById('hud-arrangement').textContent = arrLabel;
     
                                 // Clear any lingering audio-error banner from a prior song.
                                 const existingAudioErr = document.getElementById('audio-error-banner');
@@ -2643,9 +2647,12 @@ function createHighway() {
                                 // Populate arrangement dropdown
                                 if (msg.arrangements) {
                                     const sel = document.getElementById('arr-select');
-                                    sel.innerHTML = msg.arrangements.map(a =>
-                                        `<option value="${a.index}" ${a.index === msg.arrangement_index ? 'selected' : ''}>${a.name} (${a.notes})</option>`
-                                    ).join('');
+                                    const namingMode = localStorage.getItem('arrangementNamingMode') ?? 'smart';
+                                    sel.innerHTML = msg.arrangements.map(a => {
+                                        const displayName = (namingMode === 'smart' && a.smart_name) ? a.smart_name : a.name;
+                                        const label = namingMode === 'smart' ? displayName : `${displayName} (${a.notes})`;
+                                        return `<option value="${a.index}" ${a.index === msg.arrangement_index ? 'selected' : ''}>${label}</option>`;
+                                    }).join('');
                                 }
                             }
                             // Plugin context API — broadcast current song state
@@ -2658,6 +2665,7 @@ function createHighway() {
                                     artist: msg.artist,
                                     duration: msg.duration,
                                     arrangement: msg.arrangement,
+                                    arrangementSmartName: msg.arrangement_smart_name ?? null,
                                     arrangementIndex: msg.arrangement_index,
                                     arrangements: msg.arrangements || [],
                                     tuning: msg.tuning,

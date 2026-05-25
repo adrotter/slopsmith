@@ -94,14 +94,21 @@ def vocals_has_signal(vocals_path: Path, threshold: float = 0.005) -> bool:
     hallucinated lyrics. The default threshold is conservative; a
     truly silent stem reads ~1e-6, normal vocals well above 0.01.
 
-    Returns True when soundfile or numpy is missing (gate is best-effort,
-    not a hard requirement). The transcription itself will surface the
-    real failure if those deps are needed downstream."""
+    Returns True when soundfile or numpy is missing OR fails to load
+    its native lib (best-effort gate, not a hard requirement). The
+    transcription itself will surface the real failure if those deps
+    are actually needed downstream.
+
+    Catching OSError matters because `import soundfile` performs a
+    ctypes load of `libsndfile` at import time — on a host without the
+    native lib installed, that raises `OSError` (not ImportError) and
+    would otherwise propagate up and break the surrounding
+    transcription run instead of just skipping the gate."""
     try:
         import numpy as np
         import soundfile as sf
-    except ImportError:
-        log.debug("vocals_has_signal: soundfile/numpy missing — skipping gate")
+    except (ImportError, OSError) as e:
+        log.debug("vocals_has_signal: soundfile/numpy unavailable (%s) — skipping gate", e)
         return True
     try:
         data, _sr = sf.read(str(vocals_path), dtype="float32", always_2d=False)

@@ -164,14 +164,32 @@ def test_mapper_handles_empty_input():
 
 # ── Silence gate (uses soundfile + numpy) ───────────────────────────────────
 
+
+def _import_soundfile_or_skip():
+    """Import soundfile, skip the test if it OR its native libsndfile is
+    missing. `pytest.importorskip("soundfile")` alone only catches
+    ImportError, but `import soundfile` performs a ctypes load of
+    libsndfile at import time — on a host without the native lib it
+    raises OSError, which would error the test suite (especially now
+    that soundfile is in CI's requirements-test.txt and the wheel is
+    expected to be present) instead of cleanly skipping."""
+    try:
+        import soundfile as sf
+        return sf
+    except ImportError as e:
+        pytest.skip(f"soundfile not installed: {e}")
+    except OSError as e:
+        pytest.skip(f"soundfile native library unavailable: {e}")
+
+
 def _make_wav(path, samples, sr: int = 22050):
-    sf = pytest.importorskip("soundfile")
+    sf = _import_soundfile_or_skip()
     sf.write(str(path), samples, sr)
 
 
 def test_vocals_has_signal_returns_false_for_silent_wav(tmp_path):
     np = pytest.importorskip("numpy")
-    pytest.importorskip("soundfile")
+    _import_soundfile_or_skip()
     silent = np.zeros(22050, dtype="float32")
     p = tmp_path / "silent.wav"
     _make_wav(p, silent)
@@ -180,7 +198,7 @@ def test_vocals_has_signal_returns_false_for_silent_wav(tmp_path):
 
 def test_vocals_has_signal_returns_true_for_loud_wav(tmp_path):
     np = pytest.importorskip("numpy")
-    pytest.importorskip("soundfile")
+    _import_soundfile_or_skip()
     # 440Hz sine at full scale — clearly above any reasonable threshold.
     t = np.linspace(0, 1.0, 22050, endpoint=False, dtype="float32")
     sine = (0.5 * np.sin(2 * np.pi * 440 * t)).astype("float32")
@@ -192,7 +210,7 @@ def test_vocals_has_signal_returns_true_for_loud_wav(tmp_path):
 def test_vocals_has_signal_open_fails_returns_true(tmp_path):
     # Gate is best-effort: when reading the file fails we let downstream
     # surface the real error rather than mis-classify the input as silent.
-    pytest.importorskip("soundfile")
+    _import_soundfile_or_skip()
     p = tmp_path / "does-not-exist.wav"
     assert vocals_has_signal(p, threshold=0.005) is True
 

@@ -100,7 +100,13 @@ def _parse_lyrics_with_source(extracted_dir: Path) -> tuple[list[dict], str | No
 
     Caller uses `source` to populate the manifest's `lyrics_source`
     field so downstream UI can distinguish Rocksmith-authored lyrics
-    from later auto-transcribed ones (see WhisperX fallback path)."""
+    from later auto-transcribed ones (see WhisperX fallback path).
+
+    Empty XML vocals files (root tag matches but zero `<vocal>` entries)
+    do NOT short-circuit the SNG fallback — official DLC sometimes
+    ships a placeholder XML alongside the real SNG vocals data, and
+    treating the empty XML as authoritative would hide the lyrics
+    that actually exist."""
     # Try vocals XML first (CDLC and some official DLC)
     for xml_path in sorted(extracted_dir.rglob("*.xml")):
         try:
@@ -110,17 +116,20 @@ def _parse_lyrics_with_source(extracted_dir: Path) -> tuple[list[dict], str | No
             continue
         if root.tag != "vocals":
             continue
-        return (
-            [
-                {
-                    "t": round(float(v.get("time", "0")), 3),
-                    "d": round(float(v.get("length", "0")), 3),
-                    "w": v.get("lyric", ""),
-                }
-                for v in root.findall("vocal")
-            ],
-            "xml",
-        )
+        lyrics = [
+            {
+                "t": round(float(v.get("time", "0")), 3),
+                "d": round(float(v.get("length", "0")), 3),
+                "w": v.get("lyric", ""),
+            }
+            for v in root.findall("vocal")
+        ]
+        if lyrics:
+            return (lyrics, "xml")
+        # Empty `<vocals>` shell — keep scanning. Don't short-circuit
+        # to SNG either: another XML file in the extract might be the
+        # real one. The outer loop will hit the SNG fallback only if
+        # no XML produces tokens.
     # Fall back to vocals SNG (official DLC ships SNG-only)
     try:
         from sng_vocals import parse_vocals_sng

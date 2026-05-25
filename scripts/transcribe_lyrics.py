@@ -106,7 +106,9 @@ def main() -> int:
     ap.add_argument("target", type=Path,
                     help="sloppak (file or directory form) or a directory containing many")
     ap.add_argument("--force", action="store_true",
-                    help="overwrite existing lyrics.json (default: skip songs that already have lyrics)")
+                    help="overwrite existing lyrics (any manifest-declared lyrics path) "
+                         "and write a fresh canonical lyrics.json. Default: skip songs "
+                         "whose manifest already declares a lyrics file.")
     ap.add_argument("--model", default="htdemucs_6s",
                     help="demucs model for state-2 (no vocals stem yet) splits. "
                          "Default htdemucs_6s.")

@@ -1260,9 +1260,12 @@ def transcribe_existing_sloppak(
          who don't want stems can keep using the convert path with
          no `--auto-lyrics`).
 
-      3. Sloppak already has `lyrics.json` — short-circuit unless
-         `force=True`. Mirrors the fallback-only semantics of the
-         split path; `force=True` is the escape hatch.
+      3. Sloppak already has lyrics — short-circuit unless
+         `force=True`. "Already has lyrics" means the manifest's
+         `lyrics` key points at a file that exists on disk
+         (resolved via `_existing_lyrics_path()`), regardless of
+         filename. Mirrors the fallback-only semantics of the split
+         path; `force=True` is the escape hatch.
 
     Returns True when new lyrics were written, False otherwise. Like
     `_maybe_transcribe_lyrics`, exceptions inside the transcription

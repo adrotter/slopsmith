@@ -110,16 +110,38 @@ def vocals_has_signal(vocals_path: Path, threshold: float = 0.005) -> bool:
     except (ImportError, OSError) as e:
         log.debug("vocals_has_signal: soundfile/numpy unavailable (%s) — skipping gate", e)
         return True
+    # Stream the file in blocks instead of loading the whole stem into
+    # memory. A 4-minute stereo vocal stem at 44.1kHz is ~84 MB as
+    # float32; multiply that across a batch of conversions and the
+    # allocations get noticeable. SoundFile.blocks() yields chunks
+    # without ever holding the full buffer, and we only need a
+    # running sum-of-squares + frame count to compute RMS at the end.
+    # Short-circuit threshold check inside the loop: once we've
+    # accumulated enough signal to clear the gate, no need to keep
+    # scanning the rest of the file.
+    sumsq = 0.0
+    nframes = 0
     try:
-        data, _sr = sf.read(str(vocals_path), dtype="float32", always_2d=False)
+        with sf.SoundFile(str(vocals_path)) as fh:
+            for block in fh.blocks(blocksize=65536, dtype="float32", always_2d=False):
+                if block.size == 0:
+                    continue
+                if block.ndim > 1:
+                    block = block.mean(axis=1)
+                sumsq += float(np.sum(np.square(block)))
+                nframes += int(block.shape[0])
+                # Early exit once we know the gate will pass — no point
+                # reading the rest of a 4-minute file to confirm.
+                if nframes > 0 and (sumsq / nframes) >= (threshold * threshold):
+                    log.debug("vocals_has_signal: %s passed early at %d frames",
+                              vocals_path.name, nframes)
+                    return True
     except Exception as e:
         log.warning("vocals_has_signal: read of %s failed: %s", vocals_path, e)
         return True
-    if data.size == 0:
+    if nframes == 0:
         return False
-    if data.ndim > 1:
-        data = data.mean(axis=1)
-    rms = float(np.sqrt(np.mean(np.square(data))))
+    rms = float(np.sqrt(sumsq / nframes))
     log.debug("vocals_has_signal: %s rms=%.6f threshold=%.6f", vocals_path.name, rms, threshold)
     return rms >= threshold
 

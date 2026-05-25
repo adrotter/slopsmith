@@ -13,8 +13,12 @@ Accepts both forms:
 - Directory-form sloppak: edited in place.
 - Zip-form sloppak:       unpacked to a temp dir, edited, re-zipped atomically.
 
-Requires `demucs` to be importable in the current interpreter:
-    pip install demucs
+Either local Demucs OR a configured remote Demucs server works:
+- Local: `pip install demucs` so the package is importable.
+- Remote: set `demucs_server_url` in `${CONFIG_DIR}/config.json` and
+  the underlying split_sloppak_stems() will POST to that server's
+  /separate endpoint instead. Local install is then optional —
+  used only as a fallback if the remote call fails.
 
 Default model is `htdemucs_6s` which produces 6 stems:
     vocals, drums, bass, guitar, piano, other

@@ -76,8 +76,11 @@ def test_mapper_drops_words_with_missing_score():
 
 
 def test_mapper_inserts_line_break_on_segment_gap_above_threshold():
-    # Two segments separated by > 1.5s — the mapper drops a `+` syllable
-    # at the start of the second segment so the lyrics overlay can wrap.
+    # Two segments separated by > 1.5s — the mapper appends `+` to the
+    # last word of the previous line. Matches static/highway.js which
+    # parses `+` as a suffix marker (raw.endsWith('+')) and strips it
+    # before rendering. A bare {"w": "+"} token would be rendered as an
+    # empty syllable / blank slot in the overlay.
     aligned = {
         "segments": [
             {"words": [
@@ -90,8 +93,7 @@ def test_mapper_inserts_line_break_on_segment_gap_above_threshold():
     }
     got = _whisperx_to_sloppak(aligned, min_score=0.0)
     assert got == [
-        {"t": 1.0, "d": 0.2, "w": "first"},
-        {"t": 5.0, "d": 0.0, "w": "+"},
+        {"t": 1.0, "d": 0.2, "w": "first+"},
         {"t": 5.0, "d": 0.3, "w": "second"},
     ]
 

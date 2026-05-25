@@ -135,28 +135,36 @@ def _whisperx_to_sloppak(aligned: dict, min_score: float) -> list[dict]:
     `aligned` is the dict returned by `whisperx.align()`: a `segments`
     list, each segment carrying a `words` list of `{word, start, end,
     score}` dicts. Drops words below `min_score` (hallucination filter)
-    and inserts `+` line-break syllables on segment gaps that exceed
+    and marks line breaks on segment gaps that exceed
     `_LINE_BREAK_GAP_SECONDS`.
+
+    Line-break encoding follows the frontend lyric renderer's convention
+    in `static/highway.js`: `+` is a SUFFIX on the last word of a line,
+    not a standalone token. A bare `{"w": "+"}` token would be parsed
+    as an empty syllable that ends a line — visible as a blank slot in
+    the overlay. Emitting `"world+"` instead keeps the syllable count
+    correct and the renderer strips the suffix when drawing.
 
     Times are rounded to 3 decimals to match the convention in
     `sloppak_convert.py:_parse_lyrics()`."""
     out: list[dict] = []
     prev_end: float | None = None
+    pending_line_break = False
     for segment in aligned.get("segments", []) or []:
         words = segment.get("words") or []
         if not words:
             continue
-        # Insert a line break syllable when the gap between this segment
-        # and the previous one is comfortably large. Use the first word's
-        # start as the break time so it precedes the next syllable in
-        # playback order.
+        # Flag a line break when the gap between this segment and the
+        # previous one is comfortably large. We don't emit it yet — we
+        # need to wait until the previous segment's last surviving word
+        # is in `out` so we can suffix `+` onto it.
         first_start = words[0].get("start")
         if (
             prev_end is not None
             and isinstance(first_start, (int, float))
             and (first_start - prev_end) > _LINE_BREAK_GAP_SECONDS
         ):
-            out.append({"t": round(float(first_start), 3), "d": 0.0, "w": "+"})
+            pending_line_break = True
         last_end_in_seg: float | None = None
         for w in words:
             text = (w.get("word") or "").strip()
@@ -173,6 +181,13 @@ def _whisperx_to_sloppak(aligned: dict, min_score: float) -> list[dict]:
                 continue
             if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
                 continue
+            # Apply the pending line break by appending `+` to the
+            # previous syllable's text. Cleared once consumed so we
+            # don't double-suffix the same break across segments.
+            if pending_line_break and out:
+                if not out[-1]["w"].endswith("+"):
+                    out[-1]["w"] = out[-1]["w"] + "+"
+                pending_line_break = False
             duration = max(_MIN_WORD_DURATION, float(end) - float(start))
             out.append({
                 "t": round(float(start), 3),
@@ -392,13 +407,29 @@ def transcribe_vocals_remote(
     if "segments" in data:
         return _whisperx_to_sloppak(data, min_score=min_word_score)
     if "words" in data:
-        return [
-            {
-                "t": round(float(w["t"]), 3),
-                "d": round(float(w["d"]), 3),
-                "w": str(w["w"]),
-            }
-            for w in data["words"]
-            if "t" in w and "d" in w and "w" in w
-        ]
+        raw_words = data["words"]
+        if not isinstance(raw_words, list):
+            raise RuntimeError(
+                f"WhisperX server returned non-list `words`: {type(raw_words).__name__}"
+            )
+        out: list[dict] = []
+        for w in raw_words:
+            # Defensive: a malformed server could ship strings, numbers,
+            # or partial dicts. Skip anything that isn't a dict with all
+            # three required keys so the loop doesn't crash on bad data —
+            # the worst case is a partial transcription, not a wedged job.
+            if not isinstance(w, dict):
+                continue
+            if "t" not in w or "d" not in w or "w" not in w:
+                continue
+            try:
+                out.append({
+                    "t": round(float(w["t"]), 3),
+                    "d": round(float(w["d"]), 3),
+                    "w": str(w["w"]),
+                })
+            except (TypeError, ValueError):
+                # Bad numeric types on this entry; skip and continue.
+                continue
+        return out
     raise RuntimeError(f"WhisperX server returned unrecognized shape: {str(data)[:300]}")

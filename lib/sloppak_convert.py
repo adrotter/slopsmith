@@ -1266,6 +1266,13 @@ def _transcribe_existing_in_dir(
         _split_in_dir(source_dir, model, progress_cb, base_frac, span_frac,
                       transcribe_lyrics=True)
     finally:
-        if previous_lyrics is not None and not lyrics_path.exists():
+        # Snapshot whether a *new* lyrics.json landed BEFORE we touch the
+        # restore path. Returning `lyrics_path.exists()` after restoring
+        # the old bytes would falsely report success — the file exists,
+        # but only because we put it back — and the caller (zip-form
+        # transcribe_existing_sloppak) would then repack the sloppak for
+        # no reason.
+        wrote_new = lyrics_path.exists()
+        if previous_lyrics is not None and not wrote_new:
             lyrics_path.write_bytes(previous_lyrics)
-    return lyrics_path.exists()
+    return wrote_new

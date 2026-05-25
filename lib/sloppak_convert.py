@@ -859,6 +859,45 @@ def _rewrite_stems_manifest(source_dir: Path, new_stems: list[dict]) -> None:
     )
 
 
+def _existing_lyrics_path(source_dir: Path) -> Path | None:
+    """Return the on-disk path of an existing lyrics file the manifest
+    declares, or None if there isn't one.
+
+    The sloppak format allows `manifest.yaml: lyrics: <any-relpath>`
+    so the gate that decides "already has lyrics" can't just check
+    `source_dir / lyrics.json` — that misses manifests pointing at
+    `lyrics/karaoke.json` or similar. Reads the manifest, resolves
+    the `lyrics` key against `source_dir` with the same
+    relative-to(source_dir) safety check the sloppak loader uses
+    (lib/sloppak.py), and returns the path only when the file
+    actually exists on disk.
+
+    Returns None on any failure mode — no manifest, malformed YAML,
+    traversal attempt, missing key, missing file. Caller treats None
+    as "no existing lyrics — fallback path may run"."""
+    mf = source_dir / "manifest.yaml"
+    if not mf.exists():
+        mf = source_dir / "manifest.yml"
+    if not mf.exists():
+        return None
+    try:
+        data = yaml.safe_load(mf.read_text(encoding="utf-8")) or {}
+    except Exception as e:
+        log.debug("_existing_lyrics_path: manifest parse failed: %s", e)
+        return None
+    if not isinstance(data, dict):
+        return None
+    rel = data.get("lyrics")
+    if not isinstance(rel, str) or not rel:
+        return None
+    try:
+        candidate = (source_dir / rel).resolve()
+        candidate.relative_to(source_dir.resolve())
+    except (ValueError, OSError):
+        return None
+    return candidate if candidate.exists() else None
+
+
 def _rewrite_lyrics_manifest(
     source_dir: Path,
     lyrics_rel: str,
@@ -942,7 +981,13 @@ def _maybe_transcribe_lyrics(
         log.debug("_maybe_transcribe_lyrics: %s missing despite manifest entry", vocals_path)
         return _skip("Vocals stem missing")
     lyrics_path = source_dir / "lyrics.json"
-    if lyrics_path.exists() and not force:
+    # "Already present" gate consults the manifest, not just the
+    # `lyrics.json` filename — sloppaks can store lyrics at any
+    # manifest-declared path (e.g. `lyrics: karaoke/lyrics.json`).
+    # Checking only `source_dir / "lyrics.json"` would silently
+    # overwrite an existing entry at a different location and leave
+    # the manifest pointing at a new file we just wrote.
+    if not force and _existing_lyrics_path(source_dir) is not None:
         log.info("_maybe_transcribe_lyrics: %s already has lyrics, skipping (use force=True to override)",
                  source_dir.name)
         return _skip("Lyrics already present")
@@ -1271,13 +1316,25 @@ def _transcribe_existing_in_dir(
     span_frac: float,
 ) -> bool:
     """Per-directory helper for `transcribe_existing_sloppak`."""
-    lyrics_path = source_dir / "lyrics.json"
+    # Existing-lyrics gate consults the manifest, not just a hardcoded
+    # `lyrics.json` filename. The sloppak format lets manifests point at
+    # any relpath, so a sloppak with `lyrics: karaoke/lyrics.json` was
+    # previously seen as "no lyrics" and would have been overwritten
+    # with a fresh `lyrics.json` (plus a manifest rewrite to point at
+    # the new path, silently orphaning the old file).
+    existing_lyrics_path = _existing_lyrics_path(source_dir)
     vocals_path = source_dir / "stems" / "vocals.ogg"
     full_path = source_dir / "stems" / "full.ogg"
+    # The transcribe path writes to a canonical `lyrics.json` regardless
+    # of where the previous lyrics lived — we don't try to mirror the
+    # old path's quirks. That keeps the post-state predictable for
+    # downstream readers (and for the zip-form caller's repack).
+    new_lyrics_path = source_dir / "lyrics.json"
 
-    if lyrics_path.exists() and not force:
-        log.info("transcribe_existing_sloppak: %s already has lyrics.json (pass force=True to override)",
-                 source_dir.name)
+    if existing_lyrics_path is not None and not force:
+        log.info("transcribe_existing_sloppak: %s already has lyrics at %s "
+                 "(pass force=True to override)",
+                 source_dir.name, existing_lyrics_path.name)
         return False
 
     if vocals_path.exists():
@@ -1303,29 +1360,32 @@ def _transcribe_existing_in_dir(
 
     # State 2: only a full mix exists. Delegate to the split path so
     # Demucs produces vocals.ogg and the same transcription gate fires
-    # at the end. The transcribe gate inside `_split_in_dir` is keyed
-    # off `lyrics.json` existence, so under `force=True` we have to
-    # stash the existing file out of the way before the split runs.
-    # Restore it from the in-memory backup if transcription doesn't
-    # write a fresh one (Demucs success but Whisper failure / silence
-    # gate / config missing) — losing the user's only lyrics because
-    # we proactively deleted them and the new pass bailed is the worst
-    # possible failure mode here.
-    previous_lyrics = None
-    if force and lyrics_path.exists():
-        previous_lyrics = lyrics_path.read_bytes()
-        lyrics_path.unlink(missing_ok=True)
+    # at the end. The transcribe gate inside `_split_in_dir` consults
+    # the manifest via `_existing_lyrics_path`, so under `force=True`
+    # we have to stash the existing file (whatever its manifest-declared
+    # name) out of the way before the split runs, and restore from the
+    # in-memory backup if transcription doesn't write a fresh one
+    # (Demucs success but Whisper failure / silence gate / config
+    # missing). Losing the user's only lyrics because we proactively
+    # deleted them and the new pass bailed is the worst possible
+    # failure mode here.
+    previous_lyrics_bytes: bytes | None = None
+    previous_lyrics_target: Path | None = None
+    if force and existing_lyrics_path is not None:
+        previous_lyrics_bytes = existing_lyrics_path.read_bytes()
+        previous_lyrics_target = existing_lyrics_path
+        existing_lyrics_path.unlink(missing_ok=True)
     try:
         _split_in_dir(source_dir, model, progress_cb, base_frac, span_frac,
                       transcribe_lyrics=True)
     finally:
         # Snapshot whether a *new* lyrics.json landed BEFORE we touch the
-        # restore path. Returning `lyrics_path.exists()` after restoring
-        # the old bytes would falsely report success — the file exists,
-        # but only because we put it back — and the caller (zip-form
+        # restore path. Returning existence after restoring the old bytes
+        # would falsely report success — the file exists, but only
+        # because we put it back — and the caller (zip-form
         # transcribe_existing_sloppak) would then repack the sloppak for
         # no reason.
-        wrote_new = lyrics_path.exists()
-        if previous_lyrics is not None and not wrote_new:
-            lyrics_path.write_bytes(previous_lyrics)
+        wrote_new = new_lyrics_path.exists()
+        if previous_lyrics_bytes is not None and previous_lyrics_target is not None and not wrote_new:
+            previous_lyrics_target.write_bytes(previous_lyrics_bytes)
     return wrote_new

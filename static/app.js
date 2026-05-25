@@ -4532,6 +4532,11 @@ async function changeArrangement(index) {
     }
 }
 
+// Per-attempt counter for HTML5 audio.play() invocations. Bumped on
+// every play branch entry so a slow rejection from attempt N can't
+// clobber the UI of a newer attempt N+1 within the same session.
+let _playAttemptGen = 0;
+
 async function togglePlay() {
     if (window._juceMode) {
         if (isPlaying) {
@@ -4554,8 +4559,29 @@ async function togglePlay() {
         audio.pause(); isPlaying = false;
         setPlayButtonState(false);
     } else {
-        audio.play(); isPlaying = true;
+        // Flip the UI optimistically before awaiting the play() Promise so
+        // a quick second click during a slow start (buffering, device
+        // wake, etc.) still enters the pause branch above. Two stale-
+        // resolution guards:
+        //   - _audioSeekGen: bumped in showScreen() teardown and
+        //     playSong(), so a rejection from a torn-down session can't
+        //     touch new-session UI. Survives same-URL reloads.
+        //   - _playAttemptGen: bumped on every play branch entry, so
+        //     within a single session a slow rejection from attempt N
+        //     can't clobber a faster attempt N+1 (Play → Pause → Play).
+        const sessionGen = _audioSeekGen;
+        const attempt = ++_playAttemptGen;
+        isPlaying = true;
         setPlayButtonState(true);
+        try {
+            await audio.play();
+        } catch (err) {
+            if (sessionGen !== _audioSeekGen) return;
+            if (attempt !== _playAttemptGen) return;
+            console.error('[app] audio.play() rejected:', err);
+            isPlaying = false;
+            setPlayButtonState(false);
+        }
     }
 }
 
@@ -5476,9 +5502,18 @@ async function startCountIn() {
                         window.slopsmith.emit('song:play', _songEventPayload());
                     }).catch((err) => console.error('[app] jucePlayer.play error:', err));
                 } else {
-                    audio.play();
-                    isPlaying = true;
-                    setPlayButtonState(true);
+                    audio.play().then(() => {
+                        if (gen !== _countInGen) return;
+                        isPlaying = true;
+                        setPlayButtonState(true);
+                    }).catch((err) => {
+                        if (gen !== _countInGen) return;
+                        // Same rationale as togglePlay: don't claim playback
+                        // started if the Promise rejected.
+                        console.error('[app] audio.play() rejected after count-in:', err);
+                        isPlaying = false;
+                        setPlayButtonState(false);
+                    });
                 }
                 return;
             }

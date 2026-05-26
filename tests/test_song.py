@@ -845,8 +845,10 @@ def test_smart_names_full_mix():
 
 
 def test_smart_names_unknown_name_returns_none():
-    # Arrangement without path flags and unknown name → null (e.g. Vocals)
-    assert compute_smart_names([_sarr(name="Vocals")]) == [None]
+    # Arrangement without path flags and a name outside the fallback set
+    # (Lead / Rhythm / Bass / Combo) → None. Distinct from Vocals/ShowLights,
+    # which have their own explicit-skip coverage below.
+    assert compute_smart_names([_sarr(name="JustSomethingElse")]) == [None]
 
 
 def test_smart_names_name_fallback_when_path_flags_zero():

@@ -2660,7 +2660,9 @@ function createHighway() {
                                     sel.textContent = '';
                                     for (const a of msg.arrangements) {
                                         const displayName = (namingMode === 'smart' && a.smart_name) ? a.smart_name : a.name;
-                                        const label = namingMode === 'smart' ? displayName : `${displayName} (${a.notes})`;
+                                        // Keep the note-count suffix in both modes — useful for
+                                        // disambiguating sibling arrangements (e.g. two "Alt. Lead"s).
+                                        const label = `${displayName} (${a.notes})`;
                                         const opt = document.createElement('option');
                                         opt.value = a.index;
                                         opt.selected = a.index === msg.arrangement_index;

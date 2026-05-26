@@ -500,6 +500,11 @@ class MetadataDB:
         # Falls back to matching `name` for older rows without smart_name.
         # Legacy mode: matches `name` directly (original behaviour).
         arr_has = [a for a in (arrangements_has or []) if a in self._ALLOWED_ARRANGEMENT_NAMES]
+        if arr_has and naming_mode == "smart":
+            # Smart mode subsumes "Combo" into "Lead" — normalize here so a
+            # hand-rolled API client matches the client-side behaviour and
+            # the SQL doesn't need a "Combo" smart-type branch.
+            arr_has = list(dict.fromkeys("Lead" if a == "Combo" else a for a in arr_has))
         if arr_has:
             if naming_mode == "smart":
                 clauses = []
@@ -549,6 +554,8 @@ class MetadataDB:
                           f"WHERE json_extract(value, '$.name') IN ({placeholders}))")
                 params += arr_has
         arr_lacks = [a for a in (arrangements_lacks or []) if a in self._ALLOWED_ARRANGEMENT_NAMES]
+        if arr_lacks and naming_mode == "smart":
+            arr_lacks = list(dict.fromkeys("Lead" if a == "Combo" else a for a in arr_lacks))
         if arr_lacks:
             if naming_mode == "smart":
                 clauses = []

@@ -470,27 +470,44 @@ def compute_smart_names(arrangements: list[Arrangement]) -> list[str | None]:
     """
     result: list[str | None] = [None] * len(arrangements)
 
-    # Name-to-path-attr fallback used when all XML path flags are zero.
-    # "Combo" is a guitar arrangement (lead + rhythm combined) — treat as Lead.
-    _NAME_FALLBACK: dict[str, str] = {
-        "lead": "path_lead",
-        "rhythm": "path_rhythm",
-        "bass": "path_bass",
-        "combo": "path_lead",
+    # Name-to-(path_attr, bonus_override) fallback used when all XML path
+    # flags are zero. "Combo" is a guitar arrangement (lead + rhythm combined)
+    # — treat as Lead. load_song() also synthesises display names like
+    # "Bonus Lead" / "Bass 2" when manifest data is missing, so we recognise
+    # those too and force the bonus flag for "Bonus *". `None` for the
+    # override means "leave the dataclass's bonus_arr alone".
+    _NAME_FALLBACK: dict[str, tuple[str, bool | None]] = {
+        "lead": ("path_lead", None),
+        "rhythm": ("path_rhythm", None),
+        "bass": ("path_bass", None),
+        "bass 2": ("path_bass", None),
+        "combo": ("path_lead", None),
+        "bonus lead": ("path_lead", True),
+        "bonus rhythm": ("path_rhythm", True),
+        "bonus bass": ("path_bass", True),
+        "alt. lead": ("path_lead", False),
+        "alt. rhythm": ("path_rhythm", False),
+        "alt. bass": ("path_bass", False),
     }
 
-    def _path_attr(a: Arrangement) -> str | None:
+    def _resolve(a: Arrangement) -> tuple[str | None, bool]:
+        """Return (path_attr, bonus_arr) for an arrangement, applying the
+        name-based fallback when XML flags are all zero. Defensive against
+        non-string names from hand-edited PSARCs / sloppak JSON."""
         if a.path_lead:
-            return "path_lead"
+            return "path_lead", bool(a.bonus_arr)
         if a.path_rhythm:
-            return "path_rhythm"
+            return "path_rhythm", bool(a.bonus_arr)
         if a.path_bass:
-            return "path_bass"
-        # Defensive: hand-edited PSARCs / sloppak JSON can produce non-string
-        # names (None, ints, etc.). Treat anything non-string as unrecognised
-        # rather than letting .lower() raise and abort the whole computation.
+            return "path_bass", bool(a.bonus_arr)
         name = a.name if isinstance(a.name, str) else ""
-        return _NAME_FALLBACK.get(name.strip().lower())
+        entry = _NAME_FALLBACK.get(name.strip().lower())
+        if entry is None:
+            return None, bool(a.bonus_arr)
+        path_attr, bonus_override = entry
+        return path_attr, bool(a.bonus_arr) if bonus_override is None else bonus_override
+
+    _resolved = [_resolve(a) for a in arrangements]
 
     for path_attr, label in (
         ("path_lead", "Lead"),
@@ -498,8 +515,8 @@ def compute_smart_names(arrangements: list[Arrangement]) -> list[str | None]:
         ("path_bass", "Bass"),
     ):
         type_arrs = [
-            (i, a) for i, a in enumerate(arrangements)
-            if _path_attr(a) == path_attr
+            (i, arrangements[i]) for i, (pa, _bonus) in enumerate(_resolved)
+            if pa == path_attr
         ]
         if not type_arrs:
             continue
@@ -511,7 +528,7 @@ def compute_smart_names(arrangements: list[Arrangement]) -> list[str | None]:
         # If no arrangement has represent=1 (e.g. CDLC defaults or all-zero
         # flags with name fallback), fall back to treating the first by
         # represent-ascending order as the standard so there is always a "Lead".
-        main_pairs = [(i, a) for i, a in type_arrs if not a.bonus_arr]
+        main_pairs = [(i, a) for i, a in type_arrs if not _resolved[i][1]]
         standard = [(i, a) for i, a in main_pairs if a.represent == 1]
         alts = sorted(
             [(i, a) for i, a in main_pairs if a.represent != 1],
@@ -538,7 +555,7 @@ def compute_smart_names(arrangements: list[Arrangement]) -> list[str | None]:
 
         # Bonus group (bonusArr=True): sorted by represent ascending.
         bonus_arrs = sorted(
-            [(i, a) for i, a in type_arrs if a.bonus_arr],
+            [(i, a) for i, a in type_arrs if _resolved[i][1]],
             key=lambda x: x[1].represent,
         )
         n_bonus = len(bonus_arrs)

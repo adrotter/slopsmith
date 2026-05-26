@@ -863,6 +863,19 @@ def test_smart_names_combo_treated_as_lead():
     assert compute_smart_names(arrs) == ["Lead"]
 
 
+def test_smart_names_recognises_display_names_from_load_song():
+    # load_song() synthesises display names like "Bonus Lead" / "Bass 2"
+    # when manifest JSON is missing. compute_smart_names must classify them
+    # via the name fallback (and infer bonus_arr for "Bonus *") so they
+    # don't fall through to None and break smart-mode filtering.
+    arrs = [
+        _sarr(name="Lead"),         # standard main
+        _sarr(name="Bonus Lead"),   # bonus → "Bonus Lead"
+        _sarr(name="Bass 2"),       # bass-typed → "Bass" (alone in its group)
+    ]
+    assert compute_smart_names(arrs) == ["Lead", "Bonus Lead", "Bass"]
+
+
 def test_smart_names_multiple_combos_get_alt_names():
     # 3 Combo tracks with represent=0 → Lead, Alt. Lead 1, Alt. Lead 2
     arrs = [_sarr(name="Combo"), _sarr(name="Combo"), _sarr(name="Combo")]

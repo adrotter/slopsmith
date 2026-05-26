@@ -486,7 +486,11 @@ def compute_smart_names(arrangements: list[Arrangement]) -> list[str | None]:
             return "path_rhythm"
         if a.path_bass:
             return "path_bass"
-        return _NAME_FALLBACK.get(a.name.lower())
+        # Defensive: hand-edited PSARCs / sloppak JSON can produce non-string
+        # names (None, ints, etc.). Treat anything non-string as unrecognised
+        # rather than letting .lower() raise and abort the whole computation.
+        name = a.name if isinstance(a.name, str) else ""
+        return _NAME_FALLBACK.get(name.strip().lower())
 
     for path_attr, label in (
         ("path_lead", "Lead"),

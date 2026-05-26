@@ -513,13 +513,19 @@ class MetadataDB:
                         " OR json_extract(value, '$.name') LIKE ?"
                     ) if arr_type == "Lead" else ""
                     extra_null_params = ["Combo", "Alt. Combo%", "Bonus Combo%"] if arr_type == "Lead" else []
+                    # json_type() returns NULL when the key is absent and the
+                    # string 'null' when the key exists with explicit JSON null
+                    # (set by the scanner for ambiguous duplicate-name rows).
+                    # Name-fallback only applies to key-absent rows so an
+                    # explicit null suppresses the fallback and lets the
+                    # background rescan resolve the ambiguity authoritatively.
                     clauses.append(
                         "(json_extract(value, '$.smart_name') IS NOT NULL AND ("
                         f"json_extract(value, '$.smart_name') = ? OR "
                         f"json_extract(value, '$.smart_name') LIKE ? OR "
                         f"json_extract(value, '$.smart_name') LIKE ?"
                         ")) OR ("
-                        "json_extract(value, '$.smart_name') IS NULL AND ("
+                        "json_type(value, '$.smart_name') IS NULL AND ("
                         "json_extract(value, '$.name') = ? OR "
                         "json_extract(value, '$.name') LIKE ? OR "
                         f"json_extract(value, '$.name') LIKE ?{extra_null}))"
@@ -553,13 +559,19 @@ class MetadataDB:
                         " OR json_extract(value, '$.name') LIKE ?"
                     ) if arr_type == "Lead" else ""
                     extra_null_params = ["Combo", "Alt. Combo%", "Bonus Combo%"] if arr_type == "Lead" else []
+                    # json_type() returns NULL when the key is absent and the
+                    # string 'null' when the key exists with explicit JSON null
+                    # (set by the scanner for ambiguous duplicate-name rows).
+                    # Name-fallback only applies to key-absent rows so an
+                    # explicit null suppresses the fallback and lets the
+                    # background rescan resolve the ambiguity authoritatively.
                     clauses.append(
                         "(json_extract(value, '$.smart_name') IS NOT NULL AND ("
                         f"json_extract(value, '$.smart_name') = ? OR "
                         f"json_extract(value, '$.smart_name') LIKE ? OR "
                         f"json_extract(value, '$.smart_name') LIKE ?"
                         ")) OR ("
-                        "json_extract(value, '$.smart_name') IS NULL AND ("
+                        "json_type(value, '$.smart_name') IS NULL AND ("
                         "json_extract(value, '$.name') = ? OR "
                         "json_extract(value, '$.name') LIKE ? OR "
                         f"json_extract(value, '$.name') LIKE ?{extra_null}))"

@@ -457,10 +457,13 @@ def compute_smart_names(arrangements: list[Arrangement]) -> list[str | None]:
        outside that set (Vocals, ShowLights, …) → None.
 
     Naming rules per path type (Lead / Rhythm / Bass):
-    - Main group (bonusArr=False), sorted by represent ascending:
-        index 0 → "Lead" (or "Rhythm" / "Bass")
+    - Main group (bonusArr=False):
+        represent=1 → "Lead" (or "Rhythm" / "Bass") — the canonical
+            arrangement. If no entry has represent=1 (CDLC with all-zero
+            flags), the first by represent-ascending order is promoted.
         remaining (n_alts == 1) → "Alt. Lead"
         remaining (n_alts >= 2) → "Alt. Lead 1", "Alt. Lead 2", ...
+          (sorted by represent ascending)
     - Bonus group (bonusArr=True), sorted by represent ascending:
         single → "Bonus Lead"
         multiple → "Bonus Lead 1", "Bonus Lead 2", ...

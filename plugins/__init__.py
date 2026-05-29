@@ -4,13 +4,16 @@ import hashlib
 import importlib.util
 import json
 import logging
+import mimetypes
 import os
 import subprocess
 import sys
 import threading
 from pathlib import Path
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response
+
+from safepath import safe_join
 
 log = logging.getLogger("slopsmith.plugins")
 
@@ -1380,3 +1383,33 @@ def register_plugin_api(app: FastAPI):
                     return Response(tour_file.read_text(encoding="utf-8"), media_type="application/json")
                 break
         return Response("{}", status_code=404, media_type="application/json")
+
+    @app.get("/api/plugins/{plugin_id}/assets/{asset_path:path}")
+    def plugin_asset(plugin_id: str, asset_path: str):
+        """Serve a static file a plugin bundles under its own ``assets/``
+        directory (e.g. an AudioWorklet module, WASM, or image). Unlike the
+        fixed screen.js/settings.html handlers above, this is a generic
+        subtree so plugins can self-host arbitrary assets — required because
+        the browser must fetch them by URL (no CDN, per the constitution).
+
+        Containment is enforced by ``safe_join`` against ``<plugin>/assets``,
+        so ``..`` traversal, absolute paths, and NUL bytes cannot reach the
+        plugin's Python modules or anything outside ``assets/``.
+        """
+        with PLUGINS_LOCK:
+            snapshot = list(LOADED_PLUGINS)
+        for p in snapshot:
+            if p["id"] == plugin_id:
+                target = safe_join(p["_dir"] / "assets", asset_path)
+                if target is None:
+                    log.warning("Plugin %r: asset path rejected: %r", plugin_id, asset_path)
+                    break
+                if target.is_file():
+                    media_type = mimetypes.guess_type(target.name)[0]
+                    # .js must come back as JavaScript so addModule() / <script>
+                    # accept it; guess_type can miss this on some platforms.
+                    if media_type is None and target.suffix == ".js":
+                        media_type = "application/javascript"
+                    return FileResponse(target, media_type=media_type or "application/octet-stream")
+                break
+        return Response("", status_code=404)

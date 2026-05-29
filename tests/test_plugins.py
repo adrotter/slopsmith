@@ -2853,3 +2853,76 @@ def test_settings_html_served_as_utf8_regardless_of_host_locale(
         assert "â†" not in r.text  # 'â†' — arrow decoded as cp1252
     finally:
         client.close()
+
+
+@pytest.fixture()
+def asset_client(tmp_path, reset_plugin_state):
+    """A TestClient with one plugin that bundles files under ``assets/``."""
+    plugins = reset_plugin_state
+
+    plugin_dir = tmp_path / "stems"
+    (plugin_dir / "assets" / "sub").mkdir(parents=True)
+    (plugin_dir / "assets" / "worklet.js").write_text("registerProcessor('x', class {});\n")
+    (plugin_dir / "assets" / "sub" / "data.bin").write_bytes(b"\x00\x01\x02")
+    # A sibling Python module OUTSIDE assets/ that must never be reachable.
+    (plugin_dir / "routes.py").write_text("SECRET = 1\n")
+
+    plugins.LOADED_PLUGINS.append({
+        "id": "stems",
+        "name": "Stems",
+        "nav": None,
+        "type": None,
+        "has_screen": False,
+        "has_script": False,
+        "has_settings": False,
+        "has_tour": False,
+        "_dir": plugin_dir,
+        "_manifest": {},
+    })
+
+    client = _make_api_client(plugins)
+    try:
+        yield client
+    finally:
+        client.close()
+
+
+def test_plugin_asset_serves_bundled_file(asset_client):
+    """A real file under <plugin>/assets/ is served with a JS media type."""
+    r = asset_client.get("/api/plugins/stems/assets/worklet.js")
+    assert r.status_code == 200
+    assert r.text == "registerProcessor('x', class {});\n"
+    assert "javascript" in r.headers["content-type"]
+
+
+def test_plugin_asset_serves_nested_file(asset_client):
+    """Nested asset paths (assets/sub/...) resolve via the {path} match."""
+    r = asset_client.get("/api/plugins/stems/assets/sub/data.bin")
+    assert r.status_code == 200
+    assert r.content == b"\x00\x01\x02"
+
+
+def test_plugin_asset_missing_file_404(asset_client):
+    """A path under assets/ that does not exist returns 404, not 500."""
+    r = asset_client.get("/api/plugins/stems/assets/nope.js")
+    assert r.status_code == 404
+
+
+def test_plugin_asset_rejects_traversal(asset_client):
+    """`..` traversal must not escape assets/ to reach plugin Python modules."""
+    # FastAPI normalises some `..` segments at the routing layer; hit the
+    # handler's own safe_join guard with an encoded traversal too.
+    for attack in (
+        "/api/plugins/stems/assets/../routes.py",
+        "/api/plugins/stems/assets/..%2froutes.py",
+        "/api/plugins/stems/assets/sub/../../routes.py",
+    ):
+        r = asset_client.get(attack)
+        assert r.status_code == 404, attack
+        assert "SECRET" not in r.text
+
+
+def test_plugin_asset_unknown_plugin_404(asset_client):
+    """An asset request for an unloaded plugin id returns 404."""
+    r = asset_client.get("/api/plugins/ghost/assets/worklet.js")
+    assert r.status_code == 404

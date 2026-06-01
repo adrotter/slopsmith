@@ -188,7 +188,7 @@ test('window.slopsmith API surface declares setLoop/clearLoop/getLoop', () => {
     // renaming silently.
     const src = fs.readFileSync(APP_JS, 'utf8');
     // Find the slopsmith Object.assign block and check method presence.
-    const m = src.match(/window\.slopsmith\s*=\s*Object\.assign\(new EventTarget\(\),\s*\{([\s\S]*?)\}\);/);
+    const m = src.match(/window\.slopsmith\s*=\s*Object\.assign\(_slopsmithBus,\s*\{([\s\S]*?)\}\);\s*if \(_slopsmithExisting/);
     assert.ok(m, 'slopsmith Object.assign block not found');
     const block = m[1];
     assert.match(block, /setLoop\s*\(/, 'setLoop method missing from slopsmith API');

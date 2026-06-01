@@ -433,6 +433,43 @@ def _system_plugins(loaded_plugins: list[dict], plugins_root: "Path | list[Path]
             ),
             "dir": plugin_dir.name if isinstance(plugin_dir, Path) else None,
         }
+        # Strip + drop blanks to match the loader/API normalization
+        # (_normalize_string_list), so the bundle doesn't diverge from
+        # /api/plugins for manifests with whitespace-padded standards tokens.
+        standards = [s for item in manifest.get("standards", []) if isinstance(item, str) and (s := item.strip())]
+        if standards:
+            entry["standards"] = standards
+        if "capabilities" in p:
+            # Prefer the loader's validated capabilities. An empty dict here
+            # means the manifest declarations were invalid and intentionally
+            # dropped — falling back to the raw manifest would leak those
+            # unvalidated declarations into the diagnostics bundle.
+            if p["capabilities"]:
+                entry["capabilities"] = p["capabilities"]
+        elif isinstance(manifest.get("capabilities"), (dict, list)) and manifest.get("capabilities"):
+            # No loader-validated value (e.g. a stub/legacy entry) — fall back
+            # to the raw manifest capabilities.
+            entry["capabilities"] = manifest.get("capabilities")
+        if p.get("capability_validation_warnings"):
+            entry["capability_validation_warnings"] = p.get("capability_validation_warnings")
+        if p.get("capability_unsupported_versions"):
+            entry["capability_unsupported_versions"] = p.get("capability_unsupported_versions")
+        if p.get("compatibility_shims"):
+            entry["compatibility_shims"] = p.get("compatibility_shims")
+        if isinstance(manifest.get("settings_schema"), dict):
+            entry["settings_schema"] = manifest.get("settings_schema")
+        declared_ui = {
+            **(manifest.get("ui_contributions") if isinstance(manifest.get("ui_contributions"), dict) else {}),
+            **(manifest.get("ui") if isinstance(manifest.get("ui"), dict) else {}),
+        }
+        if declared_ui:
+            entry["ui_contributions"] = declared_ui
+        runtime_domains = {
+            **(manifest.get("runtime_domains") if isinstance(manifest.get("runtime_domains"), dict) else {}),
+            **(manifest.get("domains") if isinstance(manifest.get("domains"), dict) else {}),
+        }
+        if runtime_domains:
+            entry["runtime_domains"] = dict(runtime_domains)
         if isinstance(plugin_dir, Path):
             git = _git_info(plugin_dir)
             if git is not None:
@@ -894,7 +931,7 @@ def _client_section(
         # The browser always sends a dict, but the defensive non-dict branch
         # wraps unexpected payloads in {"data": ...} to produce valid JSON
         # rather than crashing — browser input is untrusted.
-        hw_data = dict(client_hardware) if isinstance(client_hardware, dict) else {"data": client_hardware}
+        hw_data: dict[str, object] = dict(client_hardware) if isinstance(client_hardware, dict) else {"data": client_hardware}
         hw_data.setdefault("schema", "client.hardware.v1")
         out["client/hardware.json"] = _safe_json_dumps(hw_data).encode("utf-8")
     if client_ua is not None:

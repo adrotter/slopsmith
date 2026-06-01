@@ -84,6 +84,242 @@ def _safe_plugin_id_for_module_name(plugin_id: str) -> str:
     return plugin_id.replace("_", "_5f_").replace(".", "_2e_")
 
 
+def _normalize_string_list(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    # Strip surrounding whitespace and drop empty-after-strip entries so values
+    # like "  capability-pipelines.v1  " match for version detection and a "   "
+    # entry doesn't leak into API responses.
+    return [stripped for item in value if isinstance(item, str) and (stripped := item.strip())]
+
+
+def _normalize_manifest_mapping(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _normalize_manifest_sequence(value) -> list:
+    return value if isinstance(value, list) else []
+
+
+_CAPABILITY_STANDARD = "capability-pipelines.v1"
+_VALID_CAPABILITY_ROLES = {
+    "owner", "provider", "observer", "requester", "transformer", "handler",
+    "validator", "short-circuiter", "contributor",
+}
+_VALID_CAPABILITY_MODES = {"active", "optional", "legacy-shim", "disabled"}
+_VALID_CAPABILITY_COMPATIBILITY = {"none", "shim-allowed", "degrade-noop", "required", "legacy-window-shim"}
+_VALID_CAPABILITY_OWNERSHIP = {"exclusive-owner", "multi-provider", "observer-only", "requester-only", "privileged", "diagnostic-only"}
+_VALID_CAPABILITY_KINDS = {"command", "provider-coordinator", "event", "diagnostic", "privileged"}
+_VALID_CAPABILITY_SAFETY = {"safe", "privileged", "sensitive", "diagnostic-only"}
+
+
+def _coerce_capability_version(value):
+    """Coerce a capability `version` to a finite number for the supported-version
+    check, or None when it isn't a recognizable number. The motivating case is a
+    numeric *string* like "1": the browser runtime does `Number(version)` and
+    treats "1" as version 1, so the backend must accept it too rather than drop
+    the declaration. A returned number != 1 is reported unsupported (matching the
+    runtime's `Number.isFinite(v) && v !== 1`); None defaults to compatible
+    (version 1), consistent with the runtime's `Number(version) || 1` fallback.
+
+    This handles ints, floats, and decimal numeric strings — the forms that
+    occur in real manifests. It does NOT mirror every JS `Number()` quirk
+    (hex/binary/octal literals, "" / null / false coercing to 0); those are not
+    valid manifest versions, and the runtime itself is inconsistent about them,
+    so they fall through to the compatible default. bool is rejected so
+    `True`/`False` aren't read as 1/0."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            number = float(value)
+        except OverflowError:
+            # An absurdly large JSON integer can't convert to float; it's not a
+            # real version, so default to compatible rather than crash parsing.
+            return None
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            number = float(text)
+        except (ValueError, OverflowError):
+            return None
+    else:
+        return None
+    # Reject NaN and infinities (a non-finite version is not a real version).
+    if number != number or number in (float("inf"), float("-inf")):
+        return None
+    return number
+
+
+def _capability_warnings(manifest: dict, plugin_id: str) -> tuple[dict, list[dict], list[dict]]:
+    raw_capabilities = manifest.get("capabilities")
+    warnings: list[dict] = []
+    unsupported: list[dict] = []
+    if raw_capabilities is None:
+        return {}, warnings, unsupported
+    if not isinstance(raw_capabilities, dict):
+        warnings.append({"field": "capabilities", "reason": "capabilities must be an object"})
+        return {}, warnings, unsupported
+
+    standards = _normalize_string_list(manifest.get("standards"))
+    unsupported_standards = [item for item in standards if item.startswith("capability-pipelines.") and item != _CAPABILITY_STANDARD]
+    sanitized: dict = {}
+    for domain, declaration in raw_capabilities.items():
+        domain_warnings: list[str] = []
+        if not isinstance(domain, str) or not domain:
+            warnings.append({"field": "capabilities", "reason": "capability domain names must be non-empty strings"})
+            continue
+        if not isinstance(declaration, dict):
+            warnings.append({"field": f"capabilities.{domain}", "reason": "capability declaration must be an object"})
+            continue
+
+        version = declaration.get("version", 1)
+        # Mirror the browser runtime's version handling: it does
+        # `Number(version)` and treats a declaration incompatible only when
+        # that is finite and != 1 (static/capabilities.js). So a numeric string
+        # like "1" coerces to a supported version, and an unparseable version
+        # falls back to 1 (compatible) rather than being dropped. Matching this
+        # avoids /api/plugins dropping declarations the runtime would accept.
+        numeric_version = _coerce_capability_version(version)
+        version_incompatible = numeric_version is not None and numeric_version != 1
+        if unsupported_standards or version_incompatible:
+            unsupported.append({
+                "plugin_id": plugin_id,
+                "domain": domain,
+                "standards": unsupported_standards or standards,
+                # Keep the raw value for diagnostics of truly unsupported versions.
+                "version": version,
+                "reason": "unsupported capability-pipelines version",
+            })
+            sanitized[domain] = {
+                "roles": [],
+                "commands": [],
+                "events": [],
+                "mode": "disabled",
+                "compatibility": "degrade-noop",
+                "ownership": "diagnostic-only",
+                "safety": "diagnostic-only",
+                "version": int(numeric_version) if numeric_version is not None and numeric_version == int(numeric_version) else 1,
+                "incompatible": True,
+            }
+            continue
+
+        roles = declaration.get("roles", [])
+        commands = declaration.get("commands", [])
+        operations = declaration.get("operations", [])
+        requests = declaration.get("requests", [])
+        observes = declaration.get("observes", [])
+        emits = declaration.get("emits", [])
+        events = declaration.get("events", [])
+        kind = declaration.get("kind", "")
+        mode = declaration.get("mode", "active")
+        compatibility = declaration.get("compatibility", "degrade-noop")
+        ownership = declaration.get("ownership", "exclusive-owner")
+        safety = declaration.get("safety", "safe")
+
+        if not isinstance(roles, list) or any(not isinstance(item, str) or item not in _VALID_CAPABILITY_ROLES for item in roles):
+            domain_warnings.append("roles must be known capability roles")
+        # Reject whitespace-only entries (not just empty strings): the browser
+        # runtime trims and drops them, so accepting them here would surface
+        # commands/operations/etc via /api/plugins that the runtime never sees.
+        if not isinstance(commands, list) or any(not isinstance(item, str) or not item.strip() for item in commands):
+            domain_warnings.append("commands must be a list of non-empty strings")
+        if not isinstance(operations, list) or any(not isinstance(item, str) or not item.strip() for item in operations):
+            domain_warnings.append("operations must be a list of non-empty strings")
+        if not isinstance(requests, list) or any(not isinstance(item, str) or not item.strip() for item in requests):
+            domain_warnings.append("requests must be a list of non-empty strings")
+        if not isinstance(observes, list) or any(not isinstance(item, str) or not item.strip() for item in observes):
+            domain_warnings.append("observes must be a list of non-empty strings")
+        if not isinstance(emits, list) or any(not isinstance(item, str) or not item.strip() for item in emits):
+            domain_warnings.append("emits must be a list of non-empty strings")
+        if not isinstance(events, list) or any(not isinstance(item, str) or not item.strip() for item in events):
+            domain_warnings.append("events must be a list of non-empty strings")
+        if kind and kind not in _VALID_CAPABILITY_KINDS:
+            domain_warnings.append("kind is not supported")
+        if mode not in _VALID_CAPABILITY_MODES:
+            domain_warnings.append("mode is not supported")
+        if compatibility not in _VALID_CAPABILITY_COMPATIBILITY:
+            domain_warnings.append("compatibility is not supported")
+        if ownership not in _VALID_CAPABILITY_OWNERSHIP:
+            domain_warnings.append("ownership is not supported")
+        if safety not in _VALID_CAPABILITY_SAFETY:
+            domain_warnings.append("safety is not supported")
+        order = declaration.get("order")
+        if order is not None and not isinstance(order, dict):
+            domain_warnings.append("order must be an object")
+        if domain_warnings:
+            warnings.append({"field": f"capabilities.{domain}", "reason": "; ".join(domain_warnings)})
+            continue
+
+        clean = {
+            "roles": roles,
+            # Store trimmed values so backend output matches the browser
+            # runtime (which trims). Validation above already guaranteed every
+            # entry is a non-empty-after-strip string.
+            "commands": _normalize_string_list(commands),
+            "operations": _normalize_string_list(operations),
+            "requests": _normalize_string_list(requests),
+            "observes": _normalize_string_list(observes),
+            "emits": _normalize_string_list(emits),
+            "events": _normalize_string_list(events),
+            "mode": mode,
+            "compatibility": compatibility,
+            "ownership": ownership,
+            "safety": safety,
+            "version": 1,
+        }
+        # Only emit `kind` when the manifest actually declared one. It defaults
+        # to "" above, but "" is not a valid value in the published manifest
+        # schema (kind is an enum), so emitting kind: "" would make /api/plugins
+        # and diagnostics violate the schema and confuse consumers.
+        if kind:
+            clean["kind"] = kind
+        if isinstance(order, dict):
+            clean["order"] = order
+        if isinstance(declaration.get("provider_policy"), dict):
+            clean["provider_policy"] = declaration["provider_policy"]
+        # Preserve the human-readable text the runtime/Inspector display
+        # (static/capabilities.js reads declaration.description / .summary).
+        # Dropping these here would blank capability descriptions in
+        # /api/plugins and the diagnostics bundle even for valid manifests.
+        for _text_field in ("description", "summary"):
+            _value = declaration.get(_text_field)
+            if isinstance(_value, str) and _value:
+                clean[_text_field] = _value
+        sanitized[domain] = clean
+    return sanitized, warnings, unsupported
+
+
+def _compatibility_shims_from_manifest(manifest: dict, plugin_id: str) -> list[dict]:
+    return []
+
+
+def _normalize_ui_contributions(manifest: dict) -> dict:
+    declared = {
+        **_normalize_manifest_mapping(manifest.get("ui_contributions")),
+        **_normalize_manifest_mapping(manifest.get("ui")),
+    }
+    legacy = []
+    if manifest.get("nav"):
+        legacy.append({"region": "ui.navigation", "legacy_source": "nav"})
+    if manifest.get("screen"):
+        legacy.append({"region": "ui.plugin-screens", "legacy_source": "screen"})
+    if manifest.get("settings"):
+        legacy.append({"region": "settings", "legacy_source": "settings"})
+    if manifest.get("type") == "visualization":
+        legacy.append({"region": "visualization", "legacy_source": "type"})
+    return {"declared": declared, "legacy": legacy}
+
+
+def _normalize_runtime_domains(manifest: dict) -> dict:
+    return {
+        **_normalize_manifest_mapping(manifest.get("runtime_domains")),
+        **_normalize_manifest_mapping(manifest.get("domains")),
+    }
+
+
 def _load_plugin_sibling(plugin_id: str, plugin_dir: Path, name: str):
     """Load a sibling module from a plugin's directory under a namespaced
     module name (`plugin_<plugin_id>.<name>`, with plugin_id
@@ -825,7 +1061,14 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
         """Build the manifest-derived nav fields shared by a pending entry and
         a graduated (ready) entry. Carries everything /api/plugins needs to
         render the nav slot — name, nav, type, bundled flag, version, and the
-        has_* capability booleans — without importing the plugin's code."""
+        has_* capability booleans — without importing the plugin's code.
+        Also carries the capability-pipelines.v1 metadata (standards,
+        validated capabilities, validation warnings, compatibility shims,
+        settings schema, UI contributions, runtime domains), all
+        manifest-derived."""
+        _validated_capabilities, _capability_validation_warnings, _capability_unsupported_versions = (
+            _capability_warnings(manifest, plugin_id)
+        )
         return {
             "id": plugin_id,
             "name": manifest.get("name", plugin_id),
@@ -837,6 +1080,14 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
             "has_script": bool(manifest.get("script")),
             "has_settings": bool(manifest.get("settings")),
             "has_tour": _is_valid_tour_manifest(manifest.get("tour")),
+            "standards": _normalize_string_list(manifest.get("standards")),
+            "capabilities": _validated_capabilities,
+            "capability_validation_warnings": _capability_validation_warnings,
+            "capability_unsupported_versions": _capability_unsupported_versions,
+            "compatibility_shims": _compatibility_shims_from_manifest(manifest, plugin_id),
+            "settings_schema": _normalize_manifest_mapping(manifest.get("settings_schema")),
+            "ui_contributions": _normalize_ui_contributions(manifest),
+            "runtime_domains": _normalize_runtime_domains(manifest),
             "_order": order,
         }
 
@@ -947,6 +1198,18 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
                 _load_plugin_sibling(_pid, _pdir, name)
         )
         plugin_context["log"] = logging.getLogger(f"slopsmith.plugin.{plugin_id}")
+        if callable(plugin_context.get("register_library_provider")):
+            _register_library_provider = plugin_context["register_library_provider"]
+
+            def _register_scoped_library_provider(provider, *args, _pid=plugin_id, _base=_register_library_provider, **kwargs):
+                # Force (not setdefault) the owner attribution to the loading
+                # plugin: owner_plugin_id drives provider attribution and the
+                # library capability participant id, so a plugin must not be
+                # able to pass a forged value and impersonate another plugin.
+                kwargs["owner_plugin_id"] = _pid
+                return _base(provider, *args, **kwargs)
+
+            plugin_context["register_library_provider"] = _register_scoped_library_provider
 
         # Load routes using importlib to avoid module name collisions.
         # `route_ok` gates graduation: only a plugin that installs AND
@@ -1166,6 +1429,17 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
                 _load_plugin_sibling(_pid, _pdir, name)
         )
         ev_context["log"] = logging.getLogger(f"slopsmith.plugin.{evicted_id}")
+        if callable(ev_context.get("register_library_provider")):
+            _ev_register_library_provider = ev_context["register_library_provider"]
+
+            def _register_scoped_fallback_library_provider(provider, *args, _pid=evicted_id, _base=_ev_register_library_provider, **kwargs):
+                # Force owner attribution to the loading plugin — see the main
+                # context wrapper above; a forged owner_plugin_id must not be
+                # able to misattribute providers or collide with another id.
+                kwargs["owner_plugin_id"] = _pid
+                return _base(provider, *args, **kwargs)
+
+            ev_context["register_library_provider"] = _register_scoped_fallback_library_provider
         # Install the fallback copy's requirements. It was evicted before
         # the main load loop ran, so _install_requirements was never called
         # for it. A user copy that depends on extra packages would otherwise
@@ -1284,6 +1558,9 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
                 # /api/plugins and the settings UI can warn that the bundled
                 # build is broken and an older user copy is running.
                 "fallback": True,
+                # Capability metadata (standards, capabilities, shims,
+                # settings_schema, ui_contributions, runtime_domains) and the
+                # has_* booleans are already carried by _nav_entry() above.
                 "_export_paths": _normalize_export_paths(ev_manifest.get("settings"), evicted_id),
                 "_diagnostics_paths": _normalize_diagnostics_paths(ev_manifest.get("diagnostics"), evicted_id),
                 "_diagnostics_callable_spec": _parse_diagnostics_callable(ev_manifest.get("diagnostics"), evicted_id),
@@ -1402,6 +1679,22 @@ def register_plugin_api(app: FastAPI):
                 "has_script": p["has_script"],
                 "has_settings": p["has_settings"],
                 "has_tour": p.get("has_tour", False),
+                # capability-pipelines.v1 metadata, computed once by
+                # _nav_entry() at discovery and carried through graduation.
+                # The `.get()` fallbacks keep stubbed test entries (which build
+                # rows directly without going through _nav_entry) working.
+                "standards": p.get("standards") or _normalize_string_list((p.get("_manifest") or {}).get("standards")),
+                "capabilities": p["capabilities"] if "capabilities" in p else _normalize_manifest_mapping((p.get("_manifest") or {}).get("capabilities")),
+                "capability_validation_warnings": p.get("capability_validation_warnings", []),
+                "capability_unsupported_versions": p.get("capability_unsupported_versions", []),
+                "compatibility_shims": p.get("compatibility_shims", _compatibility_shims_from_manifest(p.get("_manifest") or {}, p.get("id", "plugin"))),
+                # Check key presence (not truthiness) like `capabilities` above:
+                # the loader may intentionally set these to an empty dict after
+                # validation/sanitization, and a truthiness `or` would wrongly
+                # re-derive legacy/runtime-domain data from the raw manifest.
+                "settings_schema": p["settings_schema"] if "settings_schema" in p else _normalize_manifest_mapping((p.get("_manifest") or {}).get("settings_schema")),
+                "ui_contributions": p["ui_contributions"] if "ui_contributions" in p else _normalize_ui_contributions(p.get("_manifest") or {}),
+                "runtime_domains": p["runtime_domains"] if "runtime_domains" in p else _normalize_runtime_domains(p.get("_manifest") or {}),
                 # Anything in LOADED_PLUGINS is ready by construction.
                 "status": "ready",
                 "error": None,
@@ -1421,6 +1714,17 @@ def register_plugin_api(app: FastAPI):
                 "has_script": e.get("has_script", False),
                 "has_settings": e.get("has_settings", False),
                 "has_tour": e.get("has_tour", False),
+                # Pending entries are built from _nav_entry() too, so they
+                # carry the same capability-pipelines.v1 metadata — surface it
+                # so the Inspector can show still-installing plugins.
+                "standards": e.get("standards", []),
+                "capabilities": e.get("capabilities", {}),
+                "capability_validation_warnings": e.get("capability_validation_warnings", []),
+                "capability_unsupported_versions": e.get("capability_unsupported_versions", []),
+                "compatibility_shims": e.get("compatibility_shims", []),
+                "settings_schema": e.get("settings_schema", {}),
+                "ui_contributions": e.get("ui_contributions", {}),
+                "runtime_domains": e.get("runtime_domains", {}),
                 # "installing" while its deps install; "failed" if the install
                 # or route load failed (the nav entry stays, disabled, with
                 # the error text in `error`).

@@ -167,6 +167,38 @@ def test_load_sibling_returns_per_plugin_namespaced_modules(tmp_path, reset_plug
     assert not hasattr(beta_mod, "MANIFEST_DIR")
 
 
+def test_register_library_provider_context_is_scoped_to_plugin_id(tmp_path, reset_plugin_state):
+    plugins = reset_plugin_state
+    captured = []
+    _make_plugin(
+        tmp_path, "remote_source",
+        routes_body=(
+            "def setup(app, ctx):\n"
+            "    provider = {'id': 'remote:source', 'label': 'Remote Source', 'capabilities': ['library.read']}\n"
+            "    ctx['register_library_provider'](provider)\n"
+        ),
+    )
+
+    def register_library_provider(provider, *, replace=False, owner_plugin_id=None):
+        captured.append({"provider": provider, "replace": replace, "owner_plugin_id": owner_plugin_id})
+        return provider
+
+    _run_load_plugins(
+        plugins,
+        type("FakeApp", (), {})(),
+        tmp_path,
+        context={"register_library_provider": register_library_provider},
+    )
+
+    assert captured == [{
+        "provider": {"id": "remote:source", "label": "Remote Source", "capabilities": ["library.read"]},
+        "replace": False,
+        "owner_plugin_id": "remote_source",
+    }]
+    loaded = next(entry for entry in plugins.LOADED_PLUGINS if entry["id"] == "remote_source")
+    assert not any(entry.get("capability") == "library" for entry in loaded["compatibility_shims"])
+
+
 def test_load_sibling_caches_repeat_calls(tmp_path, reset_plugin_state):
     """Two `load_sibling('util')` calls within the same plugin return
     the identical module object — no double exec_module."""
@@ -2377,6 +2409,69 @@ def test_fallback_field_is_surfaced_in_api_response(tmp_path, reset_plugin_state
         client.close()
 
 
+def test_api_plugins_exposes_capability_validation_and_shim_metadata(reset_plugin_state):
+    plugins_mod = reset_plugin_state
+    fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "plugin_capabilities"
+    valid = json.loads((fixture_dir / "valid_owner_provider.json").read_text(encoding="utf-8"))
+    invalid = json.loads((fixture_dir / "invalid_capability_metadata.json").read_text(encoding="utf-8"))
+    unsupported = json.loads((fixture_dir / "unsupported_capability_version.json").read_text(encoding="utf-8"))
+
+    valid_caps, _, _ = plugins_mod._capability_warnings(valid, "stems")
+    invalid_caps, invalid_warnings, _ = plugins_mod._capability_warnings(invalid, "broken_capability_metadata")
+    unsupported_caps, _, unsupported_versions = plugins_mod._capability_warnings(unsupported, "future_capabilities")
+    plugins_mod.LOADED_PLUGINS.extend([
+        {
+            "id": "stems", "name": "Stems", "nav": None, "type": None,
+            "bundled": False, "has_screen": False, "has_script": False,
+            "has_settings": False, "has_tour": False, "standards": valid["standards"],
+            "capabilities": valid_caps, "settings_schema": {},
+            "ui_contributions": plugins_mod._normalize_ui_contributions(valid),
+            "runtime_domains": plugins_mod._normalize_runtime_domains(valid),
+            "compatibility_shims": plugins_mod._compatibility_shims_from_manifest(valid, "stems"),
+            "capability_validation_warnings": [], "capability_unsupported_versions": [],
+            "_manifest": valid,
+        },
+        {
+            "id": "broken_capability_metadata", "name": "Broken Capability Metadata",
+            "nav": invalid["nav"], "type": None, "bundled": False,
+            "has_screen": True, "has_script": False, "has_settings": True,
+            "has_tour": False, "standards": invalid["standards"],
+            "capabilities": invalid_caps, "settings_schema": {},
+            "ui_contributions": plugins_mod._normalize_ui_contributions(invalid),
+            "runtime_domains": plugins_mod._normalize_runtime_domains(invalid),
+            "compatibility_shims": plugins_mod._compatibility_shims_from_manifest(invalid, "broken_capability_metadata"),
+            "capability_validation_warnings": invalid_warnings,
+            "capability_unsupported_versions": [], "_manifest": invalid,
+        },
+        {
+            "id": "future_capabilities", "name": "Future Capabilities",
+            "nav": None, "type": None, "bundled": False, "has_screen": False,
+            "has_script": False, "has_settings": False, "has_tour": False,
+            "standards": unsupported["standards"], "capabilities": unsupported_caps,
+            "settings_schema": {}, "ui_contributions": plugins_mod._normalize_ui_contributions(unsupported),
+            "runtime_domains": plugins_mod._normalize_runtime_domains(unsupported),
+            "compatibility_shims": plugins_mod._compatibility_shims_from_manifest(unsupported, "future_capabilities"),
+            "capability_validation_warnings": [],
+            "capability_unsupported_versions": unsupported_versions,
+            "_manifest": unsupported,
+        },
+    ])
+
+    client = _make_api_client(plugins_mod)
+    try:
+        listing = {entry["id"]: entry for entry in client.get("/api/plugins").json()}
+    finally:
+        client.close()
+
+    assert listing["stems"]["capabilities"]["stems"]["roles"] == ["owner", "provider"]
+    assert listing["broken_capability_metadata"]["capabilities"] == {}
+    assert listing["broken_capability_metadata"]["capability_validation_warnings"]
+    assert listing["broken_capability_metadata"]["ui_contributions"]["legacy"]
+    assert listing["broken_capability_metadata"]["compatibility_shims"] == []
+    assert listing["future_capabilities"]["capability_unsupported_versions"]
+    assert listing["future_capabilities"]["capabilities"]["stems"]["incompatible"] is True
+
+
 
 def _run_load_plugins_with_cb(plugins, app, tmp_path, progress_cb, context=None):
     """Like _run_load_plugins but passes a progress_cb spy."""
@@ -2823,6 +2918,62 @@ def test_list_plugins_version_field(tmp_path, reset_plugin_state):
         assert ids["versioned"]["version"] == "1.2.3"
         assert "version" in ids["unversioned"], "version key must be present even when absent from manifest"
         assert ids["unversioned"]["version"] is None
+    finally:
+        client.close()
+
+
+def test_list_plugins_exposes_profile_domain_manifest_metadata(tmp_path, reset_plugin_state):
+    plugins_mod = reset_plugin_state
+    plugin_dir = tmp_path / "declared"
+    plugin_dir.mkdir()
+    manifest = {
+        "id": "declared",
+        "name": "Declared",
+        "nav": "Declared",
+        "screen": "screen.html",
+        "settings": "settings.html",
+        "type": "visualization",
+        "routes": "routes.py",
+        "standards": ["capability-pipelines.v1", "profiles.v1", 42, ""],
+        "capabilities": {"profiles": {"roles": ["observer"]}},
+        "settings_schema": {"schema_version": "1", "packable_keys": ["gain"]},
+        "ui_contributions": {"ui.player-panels": [{"id": "declared-panel"}]},
+        "ui": {"ui.player-controls": [{"id": "declared-control"}]},
+        "runtime_domains": {"midi-control": {"role": "observer"}, "custom-domain": {"role": "owner"}},
+        "domains": {"jobs": [{"id": "declared-job"}], "tempo-clock": {"role": "observer"}},
+    }
+    plugins_mod.LOADED_PLUGINS.append({
+        "id": "declared",
+        "name": "Declared",
+        "nav": "Declared",
+        "type": "visualization",
+        "has_screen": True,
+        "has_script": False,
+        "has_settings": True,
+        "has_tour": False,
+        "_dir": plugin_dir,
+        "_manifest": manifest,
+    })
+
+    client = _make_api_client(plugins_mod)
+    try:
+        response = client.get("/api/plugins")
+        assert response.status_code == 200
+        plugin = response.json()[0]
+        assert plugin["standards"] == ["capability-pipelines.v1", "profiles.v1"]
+        assert plugin["capabilities"] == {"profiles": {"roles": ["observer"]}}
+        assert plugin["settings_schema"] == {"schema_version": "1", "packable_keys": ["gain"]}
+        assert plugin["ui_contributions"]["declared"] == {
+            "ui.player-controls": [{"id": "declared-control"}],
+            "ui.player-panels": [{"id": "declared-panel"}],
+        }
+        assert {item["legacy_source"] for item in plugin["ui_contributions"]["legacy"]} == {"nav", "screen", "settings", "type"}
+        assert plugin["runtime_domains"] == {
+            "custom-domain": {"role": "owner"},
+            "jobs": [{"id": "declared-job"}],
+            "midi-control": {"role": "observer"},
+            "tempo-clock": {"role": "observer"},
+        }
     finally:
         client.close()
 

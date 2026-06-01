@@ -310,6 +310,51 @@
         return Object.assign({}, contributions);
     }
 
+
+    // Count the actual UI contribution entries a plugin declares. The
+    // normalized shape from the backend is { declared: {region: [...]},
+    // legacy: [...] } — counting top-level keys there would always return 2
+    // (declared + legacy) regardless of how many contributions exist, which
+    // made the diagnostics summary meaningless. Sum the declared region
+    // entries (each value is a contribution list) plus the legacy entries,
+    // and fall back to a flat region→contributions map for older shapes.
+    function _countUiContributions(ui) {
+        if (!ui || typeof ui !== 'object') return 0;
+        const declared = ui.declared && typeof ui.declared === 'object' ? ui.declared : null;
+        const legacy = Array.isArray(ui.legacy) ? ui.legacy : null;
+        if (declared || legacy) {
+            let count = legacy ? legacy.length : 0;
+            if (declared) {
+                // Region values are contribution lists; count only arrays so a
+                // malformed (non-array) value doesn't inflate the total.
+                for (const value of Object.values(declared)) {
+                    if (Array.isArray(value)) count += value.length;
+                }
+            }
+            return count;
+        }
+        let count = 0;
+        for (const value of Object.values(ui)) {
+            if (Array.isArray(value)) count += value.length;
+        }
+        return count;
+    }
+
+    function summarizeRuntimeDomains(snapshot) {
+        const plugins = snapshot && Array.isArray(snapshot.plugins) ? snapshot.plugins : [];
+        return plugins.reduce((summary, plugin) => {
+            const ui = plugin && plugin.ui_contributions && typeof plugin.ui_contributions === 'object'
+                ? _countUiContributions(plugin.ui_contributions) : 0;
+            const domains = plugin && plugin.runtime_domains && typeof plugin.runtime_domains === 'object'
+                ? Object.keys(plugin.runtime_domains).length : 0;
+            return {
+                plugin_count: summary.plugin_count + 1,
+                ui_contribution_count: summary.ui_contribution_count + ui,
+                runtime_domain_count: summary.runtime_domain_count + domains,
+            };
+        }, { plugin_count: 0, ui_contribution_count: 0, runtime_domain_count: 0 });
+    }
+
     window.slopsmith = window.slopsmith || {};
     window.slopsmith.diagnostics = {
         snapshot: snapshotConsole,
@@ -318,6 +363,7 @@
         snapshotUa,
         snapshotLocalStorage,
         snapshotContributions,
+        summarizeRuntimeDomains,
         contribute,
     };
 })();

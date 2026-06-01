@@ -1,6 +1,14 @@
 __pycache__/
 *.pyc
 .venv/
+venv/
+dist/
+build/
+*.egg-info/
+*.log
+.env*
+.DS_Store
+.vscode/
 static/*.ogg
 static/*.mp3
 static/*.wav
@@ -19,6 +27,8 @@ plugins/highway_3d/__pycache__/
 !plugins/app_tour_library/**
 !plugins/app_tour_settings/
 !plugins/app_tour_settings/**
+!plugins/capability_inspector/
+!plugins/capability_inspector/**
 !plugins/minigames/
 !plugins/minigames/**
 plugins/minigames/__pycache__/

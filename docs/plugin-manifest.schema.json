@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slopsmith.local/contracts/plugin-manifest-capabilities.schema.json",
+  "title": "Slopsmith Plugin Manifest Capability Contract",
+  "type": "object",
+  "required": ["id", "name"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9_.-]+$" },
+    "name": { "type": "string", "minLength": 1 },
+    "version": { "type": ["string", "null"] },
+    "private": { "type": "boolean" },
+    "standards": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+    "capability_api": {
+      "type": "object",
+      "properties": { "standard": { "const": "capability-pipelines.v1" }, "version": { "const": 1 } },
+      "additionalProperties": false
+    },
+    "capabilities": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/domainName" },
+      "additionalProperties": { "$ref": "#/$defs/capabilityDeclaration" }
+    },
+    "ui_contributions": { "type": "object", "propertyNames": { "$ref": "#/$defs/domainName" }, "additionalProperties": { "$ref": "#/$defs/contributionList" } },
+    "ui": { "type": "object", "propertyNames": { "$ref": "#/$defs/domainName" }, "additionalProperties": { "$ref": "#/$defs/contributionList" } },
+    "runtime_domains": { "type": "object", "propertyNames": { "$ref": "#/$defs/domainName" }, "additionalProperties": { "$ref": "#/$defs/domainDeclaration" } },
+    "domains": { "type": "object", "propertyNames": { "$ref": "#/$defs/domainName" }, "additionalProperties": { "$ref": "#/$defs/domainDeclaration" } },
+    "settings_schema": { "type": "object" },
+    "nav": {}, "screen": {}, "script": {}, "routes": {}, "settings": {}, "diagnostics": {}, "type": { "type": "string" }, "tour": {}
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "domainName": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9_.:-]+$" },
+    "capabilityDeclaration": {
+      "type": "object",
+      "properties": {
+        "roles": { "type": "array", "items": { "enum": ["owner", "provider", "observer", "requester", "transformer", "handler", "validator", "short-circuiter", "contributor"] }, "uniqueItems": true },
+        "commands": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "operations": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "requests": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "observes": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "emits": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "events": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "kind": { "enum": ["command", "provider-coordinator", "event", "diagnostic", "privileged"] },
+        "mode": { "enum": ["active", "optional", "legacy-shim", "disabled"] },
+        "compatibility": { "enum": ["none", "shim-allowed", "degrade-noop", "required", "legacy-window-shim"] },
+        "ownership": { "enum": ["exclusive-owner", "multi-provider", "observer-only", "requester-only", "privileged", "diagnostic-only"] },
+        "safety": { "enum": ["safe", "privileged", "sensitive", "diagnostic-only"] },
+        "order": { "type": "object", "properties": { "fixed": { "type": "boolean" }, "before": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true }, "after": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true } }, "additionalProperties": false },
+        "provider_policy": { "type": "object" },
+        "description": { "type": "string" },
+        "summary": { "type": "string" },
+        "version": { "const": 1 }
+      },
+      "additionalProperties": false
+    },
+    "domainDeclaration": { "oneOf": [{ "type": "object", "properties": { "role": { "type": "string", "minLength": 1 }, "roles": { "type": "array", "items": { "type": "string", "minLength": 1 } }, "ownership": { "enum": ["exclusive-owner", "multi-provider", "observer-only", "requester-only", "privileged", "diagnostic-only"] }, "safety": { "enum": ["safe", "privileged", "sensitive", "diagnostic-only"] }, "legacy_source": { "type": "string", "minLength": 1 } }, "additionalProperties": true }, { "type": "array" }] },
+    "contributionList": { "type": "array", "items": { "type": "object", "required": ["id"], "properties": { "id": { "type": "string", "minLength": 1 }, "region": { "type": "string", "minLength": 1 }, "label": { "type": "string" }, "order": { "type": ["number", "integer", "string"] } }, "additionalProperties": true } }
+  }
+}

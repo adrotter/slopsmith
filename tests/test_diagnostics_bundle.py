@@ -185,6 +185,34 @@ def test_plugin_callable_exception_does_not_crash(tmp_path):
         assert "plugins/buggy/callable.json" not in zf.namelist()
 
 
+def test_system_plugins_exports_capability_metadata_and_shims(tmp_path):
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    plugin = {
+        "id": "stems",
+        "name": "Stems",
+        "type": None,
+        "has_screen": True,
+        "has_script": True,
+        "has_settings": False,
+        "_dir": cfg,
+        "_manifest": {"version": "1.0.0", "routes": "routes.py"},
+        "capabilities": {"stems": {"roles": ["owner", "provider"], "commands": ["mute"]}},
+        "capability_validation_warnings": [{"field": "capabilities.bad", "reason": "invalid"}],
+        "capability_unsupported_versions": [],
+        "compatibility_shims": [{"shimId": "stems:legacy-window", "source": "stems", "capability": "stems", "legacySurface": "window._stemsState", "status": "used"}],
+    }
+    kw = _basic_kwargs(tmp_path)
+    kw["loaded_plugins"] = [plugin]
+    zip_bytes, _name, _m = db.build_bundle(**kw)
+    with _open_zip(zip_bytes) as zf:
+        data = json.loads(zf.read("system/plugins.json"))
+    entry = data["plugins"][0]
+    assert entry["capabilities"]["stems"]["roles"] == ["owner", "provider"]
+    assert entry["capability_validation_warnings"]
+    assert entry["compatibility_shims"][0]["legacySurface"] == "window._stemsState"
+
+
 def test_preview_returns_manifest_shape(tmp_path):
     out = db.preview_bundle(
         slopsmith_version="0.0.0-test",
@@ -511,6 +539,37 @@ def test_preview_suppresses_callable_spec(tmp_path):
         log=LOG,
     )
     assert called == [], "preview_bundle must not execute _diagnostics_callable_spec callables"
+
+
+def test_system_plugins_exports_manifest_capability_declarations(tmp_path):
+    plugin_dir = tmp_path / "capable"
+    plugin_dir.mkdir()
+    loaded_plugins = [{
+        "id": "capable",
+        "name": "Capable",
+        "_dir": plugin_dir,
+        "_manifest": {
+            "version": "1.0.0",
+            "capabilities": {"stems": {"roles": ["requester", "observer"]}},
+            "ui_contributions": {"ui.player-panels": [{"id": "capable-panel"}]},
+            "ui": {"ui.player-controls": [{"id": "capable-control"}]},
+            "runtime_domains": {"midi-control": {"role": "observer"}},
+            "domains": {"tempo-clock": {"role": "provider"}},
+        },
+    }]
+
+    result = db._system_plugins(loaded_plugins, plugins_root=tmp_path)
+
+    plugin = result["plugins"][0]
+    assert plugin["capabilities"] == {"stems": {"roles": ["requester", "observer"]}}
+    assert plugin["ui_contributions"] == {
+        "ui.player-controls": [{"id": "capable-control"}],
+        "ui.player-panels": [{"id": "capable-panel"}],
+    }
+    assert plugin["runtime_domains"] == {
+        "midi-control": {"role": "observer"},
+        "tempo-clock": {"role": "provider"},
+    }
 
 
 def test_system_plugins_multi_root_scans_all(tmp_path):

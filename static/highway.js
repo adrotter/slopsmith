@@ -3084,7 +3084,9 @@ function createHighway() {
         // assuming 6. Defaults to 6 between songs (until the next
         // song_info message arrives).
         getStringCount() { return stringCount; },
-        addDrawHook(fn) { _drawHooks.push(fn); },
+        addDrawHook(fn) {
+            _drawHooks.push(fn);
+        },
         removeDrawHook(fn) { _drawHooks = _drawHooks.filter(h => h !== fn); },
         /**
          * Register a per-note judgment-state provider (slopsmith#254).

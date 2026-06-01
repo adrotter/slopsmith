@@ -1,0 +1,204 @@
+# Capability Domains
+
+Capability domains are Slopsmith-wide coordination surfaces for core, bundled first-party plugins, external plugins, and future adapters. Plugins declare the runtime surfaces they use in `plugin.json`; core declares and owns host workflows directly in the runtime. These declarations let diagnostics and support tools reason about behavior without relying on private globals.
+
+## Standards
+
+Migrated plugins should declare standards explicitly:
+
+```json
+{
+  "standards": ["capability-pipelines.v1", "plugin-runtime-idempotent.v1"]
+}
+```
+
+Only declare `plugin-runtime-idempotent.v1` when repeated script hydration cannot duplicate wrappers, listeners, timers, DOM roots, diagnostics contributors, jobs, media nodes, or capability participants.
+
+## UI Contributions
+
+Legacy `nav`, `screen`, and `settings` fields still work through the existing plugin loader. PR1 keeps UI capability domains out of the runtime graph, so migrated plugins should not treat `ui.navigation`, `ui.plugin-screens`, or `settings` as active capability contracts yet. Their candidate manifest shape is reserved for a future UI-host PR:
+
+```json
+{
+  "ui": {
+    "ui.navigation": [{ "id": "my-plugin-nav", "region": "plugins", "label": "My Plugin" }],
+    "ui.plugin-screens": [{ "id": "my-plugin-screen", "region": "plugin-screens", "label": "My Plugin" }],
+    "settings": [{ "id": "my-plugin-settings", "region": "plugin-settings", "label": "My Plugin" }]
+  }
+}
+```
+
+Core continues to load legacy UI fields normally. It does not emit PR1 compatibility shim entries for UI placement or visualization `type`; the PR that promotes those domains will own their shim accounting and tests.
+
+## Runtime Domains
+
+Declare non-UI runtime surfaces under `domains` or `runtime_domains`:
+
+```json
+{
+  "domains": {
+    "library": { "role": "provider" }
+  }
+}
+```
+
+If a plugin still uses `routes`, the backend loader continues to load `routes.py` normally. PR1 does not expose that legacy surface as `backend.routes`; the backend route domain is deferred until a future PR has a concrete route/provider workflow and privilege review.
+
+Plugins that call `context["register_library_provider"](...)` are attributed to the loading plugin id in `/api/library/providers` as `owner_plugin_id`. The browser library capability module at [static/capabilities/library.js](../static/capabilities/library.js) owns the `library` domain as a `provider-coordinator`: it refreshes `/api/library/providers`, registers the built-in `local` provider as `core.library.local`, and registers plugin-backed providers under their `owner_plugin_id` when one is known. Provider manifests should still declare the `library` capability so diagnostics and the bundled inspector can show intended relationships before the backend route code runs.
+
+Route-only external plugins that participate in library workflows without registering a browsable provider should declare requester/observer intent instead of provider ownership when they adopt this contract in their own repositories. This PR documents the generic shape only: such plugins use `library` requester/observer `requests` and `observes` declarations and do not appear as providers, owners, or separate `backend.routes` domains.
+
+```json
+{
+  "capabilities": {
+    "library": {
+      "roles": ["provider"],
+      "operations": ["query-page", "query-artists", "query-stats", "tuning-names", "get-art", "sync-song"],
+      "description": "Adds a browsable library source and optional song sync.",
+      "mode": "active",
+      "compatibility": "none",
+      "safety": "safe"
+    }
+  }
+}
+```
+
+The frontend exposes the current source list through `window.slopsmith.capabilities.command('library', 'list-providers')`. Public owner commands (`list-providers`, `refresh-providers`, `get-current`, `select-provider`, `sync-song`, `inspect`) are distinct from provider operations (`query-page`, `query-artists`, `query-stats`, `tuning-names`, `get-art`, `sync-song`). The app-owned handler delegates to the existing provider registry and source selector, so plugins should not scrape the `#lib-provider` dropdown.
+
+Capability declarations may include a short `description`. The bundled Capability Inspector shows that text on expanded domain owner cards; when it is omitted, the inspector falls back to a compact generated owner summary.
+
+## Capability Roles
+
+Use capability declarations for provider/requester/observer relationships:
+
+```json
+{
+  "capabilities": {
+    "library": {
+      "roles": ["requester", "observer"],
+      "requests": ["list-providers", "get-current", "inspect"],
+      "observes": ["providers-refreshed", "source-changed"],
+      "mode": "active",
+      "compatibility": "none"
+    }
+  }
+}
+```
+
+Future app-level workflows can then express intent through capability domains instead of hard-coding plugin-private implementation details.
+
+Core registers manifest capability declarations from `/api/plugins` before plugin scripts hydrate. Runtime owners can then re-register the same participant with command handlers, event handlers, and current availability state. The merged participant view is visible through `window.slopsmith.capabilities.snapshotDiagnostics()` and `getDiagnostics()`.
+
+Core domains include review metadata in diagnostics:
+
+- `active`: wired to current Slopsmith behavior and expected to work as an integration point.
+- `diagnostic`: support/inspection-only runtime surfaces.
+
+PR1 includes only the delivered domains listed in [capability-roadmap.md](capability-roadmap.md): `pipeline`, `diagnostics`, and `library`. Playback, backend routes, plugin-owned Stems/NAM coordination, app UI, settings, visualization, audio, note-detection, and hardware-facing domains are documented in the roadmap and safety matrix, but are intentionally not registered in the runtime graph until a host workflow/provider exists. Reviewers and testers should focus behavioral validation on the small PR1 set.
+
+Capability metadata is versioned by the `capability-pipelines.v1` standard. Invalid roles, commands, operations, requests, observes, emits, events, owner kinds, compatibility modes, ownership policies, safety classes, or version fields are excluded from the capability graph and surfaced through `capability_validation_warnings`; legacy plugin fields continue to load through their existing app paths. Plugins that declare a future `capability-pipelines` version are reported through `capability_unsupported_versions` and their runtime handlers are marked incompatible.
+
+`diagnostics` and `pipeline` are adjacent support domains. `diagnostics` is the read-only snapshot/export surface: `snapshot` returns the redaction-safe state used by support bundles and the Capability Inspector. `pipeline` is the graph operations surface: `inspect`, `validate`, and `participant.set-enabled` operate on the capability graph itself and emit graph lifecycle events such as `resolved`, `runtime.validated`, and `participant.state-changed`.
+
+Requesters should use the public claim/dispatch/release flow instead of mutating another plugin's globals:
+
+```js
+const api = window.slopsmith.capabilities;
+const releaseClaim = api.claim({ capability: 'example.plugin-domain', claimId: 'example.automation-active', requester: 'example_requester' });
+await api.dispatch({
+  capability: 'example.plugin-domain',
+  command: 'apply',
+  source: 'example_requester',
+  claim: { claimId: 'example.automation-active' },
+  args: { target: { kind: 'example-target' } },
+});
+releaseClaim();
+```
+
+The claim owner is inferred from the active owner participant for the capability, so requesters should identify themselves with `requester` or `source` instead of passing an `owner` field. `release` only needs the `claimId` and, when useful for disambiguation, the `capability`.
+
+Manual user actions win over matching automation claims. When an owner records a user override for the same capability target, the registry reports the command as `overridden` and skips re-applying automation for that target. Owners keep restore snapshots for their own surfaces so requesters do not need to read private state.
+
+When a requester disappears, the registry releases its active claims and clears restore snapshot references. When an owner or live handler disappears, matching claims become `orphaned` and non-dispatchable until the user or owning plugin resolves them. Runtime enable/disable state is lifecycle metadata, not a manual override.
+
+## Owner Kinds And Dispatch Outcomes
+
+Owner participants use a `kind` that describes how the domain is coordinated:
+
+- `command`: one active owner handles public commands.
+- `provider-coordinator`: one owner coordinates provider participants through provider operations.
+- `event`: the owner primarily emits or coordinates events.
+- `diagnostic`: read-only support and inspector surfaces.
+- `privileged`: command execution needs an explicit enforcement plan before shipping.
+
+Legacy `ownership` remains accepted in manifests for compatibility and diagnostics, but new domains should prefer `kind` plus participant roles. Ownership is derived for core owners where possible: `provider-coordinator` behaves like a multi-provider domain, diagnostics are diagnostic-only, privileged owners are privileged, and command/event owners are exclusive by default.
+
+The compatibility ownership vocabulary remains:
+
+- `exclusive-owner`: at most one active owner; duplicate owners produce a conflict and dispatch degrades.
+- `multi-provider`: multiple providers may participate, but ordering must be deterministic through fixed priority or `before`/`after` constraints.
+- `observer-only`: participants listen for events and should not handle commands.
+- `requester-only`: participants request commands from another owner.
+- `privileged`: command execution needs an explicit enforcement plan before shipping.
+- `diagnostic-only`: read-only support and inspector surfaces.
+
+Dispatch results use explicit outcomes: `handled`, `transformed`, `denied`, `failed`, `degraded`, `short-circuited`, `overridden`, `no-owner`, `no-handler`, `unsupported-command`, and `incompatible-version`. No-owner, no-handler, unsupported-command, and incompatible-version decisions are recorded in diagnostics so support bundles explain why nothing happened.
+
+## Deferred Core Adapters
+
+Playback, UI placement, settings contributions, visualization, audio mixer/monitoring, and note-detection are real Slopsmith surfaces, but they are not PR1 capability contracts. Plugins should keep using the current documented APIs for those areas until the corresponding domain PR ships the host workflow, command/event contract, compatibility shims, diagnostics fields, and tests.
+
+The library provider workflow is the PR1 core adapter and is implemented natively as the `library` capability module. Provider refresh, selection, and sync run through `library` owner commands; backend provider registration remains the way providers enter the library registry, and the browser module turns that registry into provider participants. The app event bus continues to dispatch local `window.slopsmith` events for legacy listeners, but PR1 does not mirror playback, navigation, note, visualization, route, or highway events into capability domains.
+
+The direct `window.highway` object remains the renderer data plane. Per-frame reads such as notes, chords, beats, and renderer hooks should not be moved behind asynchronous capability commands until there is a dedicated chart/render facade.
+
+## First-Party Management Plugins
+
+Large management surfaces should prefer plugin-owned UI over crowding normal Settings. First-party management plugins can contribute screens and settings panels while core keeps shared services and diagnostics contracts centralized.
+
+The bundled Capability Inspector plugin is the support surface for the current graph. It reads `window.slopsmith.capabilities.snapshotDiagnostics()`, filters by domain, and summarizes manifest participants, runtime participants, conflicts, unsupported versions, safety classes, expected legacy event surfaces, and compatibility shim hits without rendering raw runtime objects. Domains are grouped in review order: application/library, player/audio runtime, plugin-defined surfaces, then capability runtime. In the all-domains view, each domain starts collapsed with a domain-specific icon plus compact summary badges for participant-lane count, endpoint count, observed links, shimmed links, and status; badge labels live in tooltips/ARIA labels so the header stays scannable. Clicking the domain label expands or collapses the domain, opening the same graph view used by the single-domain filter. The graph places owner details and right-aligned command/event groups on the left, with short owner descriptions bottom-aligned as the final part of that pane. Participant usage is grouped the same way on the right, with observed or shimmed links between border-aligned endpoint ports. In multi-provider domains, links to provider participants use provider-family colors: purple for owner-to-provider command delegation and a lighter violet for provider events. Provider participants, including `library` sources, stay on the right lane and show a provider icon in their header. Headers show role-aware core/non-core origin badges such as Core owner, Core provider, or Non-core participant; owner headers place the origin badge directly after the owner icon, and the built-in local library provider is marked as core-origin. Observer and requester roles are implied by the command/event links rather than separate header badges. Participant cards are shown only when the plugin or runtime source has visible command or event usage for the current graph filter; domains with no such usage show zero participants, and attribution-only shims with no matching endpoint stay out of the lane. Command and event groups can collapse; when collapsed, all links for that side and group converge on the single group port. Hovering a participant, endpoint, or command/event group emphasizes the matching links and dims unrelated links; owner-side labels outside the current focus de-emphasize so the active source endpoints are easy to track. Expanded domain graphs progressively enhance to Cytoscape.js overlays that route bezier links between measured DOM endpoint ports, while keeping the HTML lanes as the fallback and readable data surface. Its Plugins-menu entry is hidden by default; enable **Capability Inspector → Show in Plugins menu** from Settings when reviewing or debugging capability behavior.
+
+## Diagnostics Contract
+
+Capability diagnostics use schema `slopsmith.capabilities.diagnostics.v1`. Snapshots are redaction-safe and capped at 64 KB by trimming older `recentDecisions` first while preserving current participants, active or orphaned claims, conflicts, domain review metadata, shim summaries, safety notes, and unsupported-version reports. Server diagnostics bundles include plugin manifest capability metadata, validation warnings, unsupported-version metadata, and compatibility shim summaries.
+
+Compatibility shim entries include `shimId`, `source`, `capability`, `legacySurface`, `status`, `reason`, and optional hit fields. A shim with `hitCount > 0` means legacy behavior was observed, not merely declared. The `library` domain no longer uses compatibility shims for provider registration or source selection; provider attribution comes from `owner_plugin_id` and runtime provider participants. Future domains should add expected shim entries only in the PR that implements their actual legacy bridge.
+
+## Expected Future Domains
+
+Expected future domains live in [capability-roadmap.md](capability-roadmap.md) and [capability-safety-matrix.md](capability-safety-matrix.md) instead of the runtime graph. They are reserved names and candidate command shapes for future PRs, not current contracts. A future-domain PR should add the real host workflow, runtime registration, diagnostics redaction rules, tests, and compatibility shims in the same slice that makes the domain visible to plugins.
+
+## Incremental Roadmap
+
+Release slices should stay reviewable. The domain-level roadmap, PR1 domain set, deferred domains, shim policy, and future-domain PR checklist live in [capability-roadmap.md](capability-roadmap.md).
+
+Future privileged domains must state user value, included and excluded commands, safety class, diagnostics fields, failure recovery, and tests proving disabled or incompatible participants cannot execute handlers before implementation begins.
+
+## Rehydration Pattern
+
+Plugins that wrap shared functions such as `window.playSong` or `window.showScreen` should store wrapper state on a stable `window.__slopsmith...Hooks` object. Re-running the script should replace the implementation object and return before installing another wrapper.
+
+```js
+const hookState = window.__slopsmithMyPluginHooks || (window.__slopsmithMyPluginHooks = {});
+hookState.impl = { afterPlaySong(filename) { /* current implementation */ } };
+if (hookState.installed) return;
+hookState.installed = true;
+hookState.basePlaySong = window.playSong;
+window.playSong = async function(filename, arrangement) {
+  await hookState.basePlaySong.call(this, filename, arrangement);
+  hookState.impl?.afterPlaySong?.(filename, arrangement);
+};
+```
+
+## Validation Commands
+
+From the `slopsmith/` directory:
+
+```bash
+node --check static/app.js
+node --check static/capabilities.js
+node --check static/diagnostics.js
+node --check plugins/capability_inspector/screen.js
+node --test tests/js/*.test.js
+pytest tests/test_plugin_runtime_idempotence.py tests/test_plugins.py tests/test_diagnostics_bundle.py -q
+```

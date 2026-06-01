@@ -942,9 +942,10 @@ class LibraryProviderRegistry:
         # the `capabilities` field.  Merged with provider_capabilities() so that
         # runtime capability checks see the complete effective capability set.
         self._inferred_caps: dict[str, set[str]] = {}
+        self._owner_plugin_ids: dict[str, str] = {}
         self._lock = threading.RLock()
 
-    def register(self, provider: object, *, replace: bool = False) -> object:
+    def register(self, provider: object, *, replace: bool = False, owner_plugin_id: str | None = None) -> object:
         provider_id = self.provider_id(provider)
         if not self._ID_RE.match(provider_id):
             raise ValueError(
@@ -988,6 +989,19 @@ class LibraryProviderRegistry:
             if provider_id in self._providers and not replace:
                 raise ValueError(f"library provider {provider_id!r} is already registered")
             self._providers[provider_id] = provider
+            # owner_plugin_id is attribution that flows into the browser
+            # capability participant id. The scoped register_library_provider
+            # wrappers force it to the trusted loading plugin id, so the spoof
+            # vector is closed there. Here we only normalize: trim and require a
+            # non-empty string. We deliberately do NOT apply the provider-id
+            # grammar (_ID_RE) — plugin ids aren't constrained to it at load
+            # time, so that would silently drop attribution for valid plugins.
+            owner = owner_plugin_id.strip() if isinstance(owner_plugin_id, str) else ""
+            owner = owner or None
+            if owner:
+                self._owner_plugin_ids[provider_id] = owner
+            else:
+                self._owner_plugin_ids.pop(provider_id, None)
             if inferred:
                 self._inferred_caps[provider_id] = inferred
             else:
@@ -999,6 +1013,7 @@ class LibraryProviderRegistry:
             raise ValueError("the local library provider cannot be unregistered")
         with self._lock:
             self._inferred_caps.pop(provider_id, None)
+            self._owner_plugin_ids.pop(provider_id, None)
             return self._providers.pop(provider_id, None) is not None
 
     def get(self, provider_id: str = "local") -> object | None:
@@ -1012,11 +1027,14 @@ class LibraryProviderRegistry:
 
     def describe(self, provider: object) -> dict:
         provider_id = self.provider_id(provider)
+        with self._lock:
+            owner_plugin_id = self._owner_plugin_ids.get(provider_id)
         return {
             "id": provider_id,
             "label": self.provider_label(provider),
             "kind": self.provider_field(provider, "kind", "local" if provider_id == "local" else "remote"),
             "capabilities": sorted(self.provider_capabilities(provider)),
+            "owner_plugin_id": owner_plugin_id,
             "default": provider_id == "local",
         }
 
@@ -1068,8 +1086,8 @@ library_providers = LibraryProviderRegistry()
 library_providers.register(LocalLibraryProvider(meta_db))
 
 
-def register_library_provider(provider: object, *, replace: bool = False) -> object:
-    return library_providers.register(provider, replace=replace)
+def register_library_provider(provider: object, *, replace: bool = False, owner_plugin_id: str | None = None) -> object:
+    return library_providers.register(provider, replace=replace, owner_plugin_id=owner_plugin_id)
 
 
 def unregister_library_provider(provider_id: str) -> bool:

@@ -162,7 +162,7 @@ entry explaining why.
       "id": "stems",
       "name": "Stems",
       "version": "1.2.0",
-      "type": "visualization",
+      "type": null,
       "loaded": true,
       "has_screen": true,
       "has_script": true,
@@ -170,6 +170,13 @@ entry explaining why.
       "has_routes": true,
       "diagnostics_declared": true,
       "dir": "stems",
+      "standards": ["capability-pipelines.v1"],
+      "capabilities": {
+        "stems": { "roles": ["owner", "provider"], "commands": ["mute", "restore"] }
+      },
+      "capability_validation_warnings": [],
+      "capability_unsupported_versions": [],
+      "compatibility_shims": [],
       "git": { "sha": "abc123d", "remote": "https://github.com/topkoa/slopsmith-plugin-stems.git" }
     }
   ],
@@ -206,6 +213,22 @@ user-installed copy share the same directory name (e.g. both `highway_3d`).
 In a redacted bundle `path` has home-dir and config-dir prefixes replaced
 with placeholder tokens (e.g. `<HOME>/...`, `<CONFIG_DIR>/...`) so
 filesystem paths and usernames do not leak.
+
+Capability fields are redaction-safe manifest metadata. Invalid capability
+declarations are excluded from `capabilities` and explained in
+`capability_validation_warnings`; legacy surfaces still appear as
+`compatibility_shims` so maintainers can see which old fields were bridged
+into the capability model. Unsupported future `capability-pipelines` versions
+appear in `capability_unsupported_versions` and should be treated as
+non-executable runtime intent.
+
+Client-side capability snapshots contributed under `plugins/capabilities/client.json`
+use schema `slopsmith.capabilities.diagnostics.v1`. They include current
+pipelines, participants, conflicts, missing providers, user overrides, active
+or orphaned claims, claim lifecycle records, compatibility shim hit counts,
+unsupported-version reports, and recent decisions. The runtime caps this
+snapshot at 64 KB by trimming older `recentDecisions` first while preserving
+current graph state.
 
 ### `logs.server.v1` — `logs/server.log.meta.json`
 

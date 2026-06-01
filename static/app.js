@@ -995,6 +995,9 @@ async function showScreen(id) {
         loadSettings();
     }
     if (id !== 'player') {
+        const audio = document.getElementById('audio');
+        const stopTime = _audioTime();
+        const hadPlayableSong = !!audio.src || !!window._juceAudioUrl || isPlaying;
         highway.stop();
         // Cancel any queued seeks, in-flight shim closures, AND active
         // count-in timers before stopping playback so none of these paths
@@ -1019,7 +1022,7 @@ async function showScreen(id) {
             window._juceMode = false;
             window._juceAudioUrl = null;
         }
-        const audio = document.getElementById('audio');
+        if (hadPlayableSong) window.slopsmith.emit('song:stop', { time: stopTime || 0, screen: id });
         audio.pause();
         audio.src = '';
         window._currentSongAudio = null;
@@ -1075,50 +1078,48 @@ function _writePersistedChoice(key, value) {
     try { localStorage.setItem(key, value); } catch { /* private mode / quota */ }
 }
 
-function _readPersistedLibraryProvider() {
-    try {
-        const providerId = localStorage.getItem(_LIB_PROVIDER_KEY);
-        return providerId || 'local';
-    } catch {
-        return 'local';
-    }
+function _libraryProviderApi() {
+    const api = window.slopsmith && window.slopsmith.libraryProviders;
+    return api && typeof api === 'object' ? api : null;
 }
 
-const _LOCAL_LIBRARY_PROVIDER = {
-    id: 'local',
-    label: 'My Library',
-    kind: 'local',
-    capabilities: ['library.read', 'art.read', 'song.play'],
-    default: true,
-};
-
-let _libraryProviders = [{ ..._LOCAL_LIBRARY_PROVIDER }];
-let _selectedLibraryProviderId = _readPersistedLibraryProvider();
+function _libraryProviderSnapshot() {
+    const api = _libraryProviderApi();
+    if (api && typeof api.snapshot === 'function') return api.snapshot();
+    return { available: false, current: 'local', providers: [{ id: 'local', label: 'My Library', kind: 'local', capabilities: ['library.read', 'art.read', 'song.play'], default: true }] };
+}
 
 function _providerById(providerId) {
-    return _libraryProviders.find(provider => provider.id === providerId) || null;
+    const api = _libraryProviderApi();
+    if (api && typeof api.providerById === 'function') return api.providerById(providerId);
+    return (_libraryProviderSnapshot().providers || []).find(provider => provider.id === providerId) || null;
 }
 
 function _activeLibraryProvider() {
-    return _providerById(_selectedLibraryProviderId) || _providerById('local') || _libraryProviders[0];
+    const api = _libraryProviderApi();
+    if (api && typeof api.activeProvider === 'function') return api.activeProvider();
+    const snapshot = _libraryProviderSnapshot();
+    return _providerById(snapshot.current) || _providerById('local') || (snapshot.providers || [])[0];
 }
 
 function _activeLibraryProviderId() {
+    const api = _libraryProviderApi();
+    if (api && typeof api.activeProviderId === 'function') return api.activeProviderId();
     return (_activeLibraryProvider() || {}).id || 'local';
 }
 
 function _isLocalLibraryProvider(providerId) {
+    const api = _libraryProviderApi();
+    if (api && typeof api.isLocal === 'function') return api.isLocal(providerId);
     const provider = _providerById(providerId);
     return providerId === 'local' || (provider && provider.kind === 'local');
 }
 
 function _providerSupports(providerId, capability) {
+    const api = _libraryProviderApi();
+    if (api && typeof api.supports === 'function') return api.supports(providerId, capability);
     const provider = _providerById(providerId);
     return !!provider && Array.isArray(provider.capabilities) && provider.capabilities.includes(capability);
-}
-
-function _isBrowsableLibraryProvider(provider) {
-    return !!provider && Array.isArray(provider.capabilities) && provider.capabilities.includes('library.read');
 }
 
 function _applyLibraryProviderToParams(params) {
@@ -1139,43 +1140,22 @@ function _renderLibraryProviderSelector() {
     const select = document.getElementById('lib-provider');
     const title = document.getElementById('lib-title');
     const activeProvider = _activeLibraryProvider();
+    const providers = _libraryProviderSnapshot().providers || [];
     if (select) {
-        select.innerHTML = _libraryProviders.map(provider =>
+        select.innerHTML = providers.map(provider =>
             `<option value="${_escAttr(provider.id)}">${esc(provider.label || provider.id)}</option>`
         ).join('');
         select.value = activeProvider.id;
-        select.classList.toggle('hidden', _libraryProviders.length <= 1);
+        select.classList.toggle('hidden', providers.length <= 1);
     }
     if (title) title.textContent = activeProvider.id === 'local' ? 'Your Library' : (activeProvider.label || activeProvider.id);
 }
 
 async function loadLibraryProviders({ restoreSaved = false, reloadOnChange = false } = {}) {
     const beforeProviderId = _activeLibraryProviderId();
-    try {
-        const response = await fetch('/api/library/providers');
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const data = await response.json();
-        const providers = (Array.isArray(data.providers) ? data.providers : []).filter(_isBrowsableLibraryProvider);
-        const hasLocal = providers.some(provider => provider && provider.id === 'local');
-        _libraryProviders = hasLocal
-            ? providers
-            : [{ ..._LOCAL_LIBRARY_PROVIDER }, ...providers.filter(provider => provider && provider.id !== 'local')];
-    } catch (error) {
-        console.warn('Failed to load library providers:', error);
-        _libraryProviders = [{ ..._LOCAL_LIBRARY_PROVIDER }];
-    }
-
-    const savedProviderId = restoreSaved ? _readPersistedLibraryProvider() : _selectedLibraryProviderId;
-    const hasSavedProvider = !!_providerById(savedProviderId);
-    const hasSelectedProvider = !!_providerById(_selectedLibraryProviderId);
-    if (hasSavedProvider) {
-        _selectedLibraryProviderId = savedProviderId;
-    } else if (!hasSelectedProvider) {
-        // The saved/selected provider is not in the current list — it may not have been
-        // registered yet (e.g. plugins haven't loaded on first call). Fall back to local
-        // in-memory but do NOT overwrite localStorage: a second call after plugins load
-        // will restore the correct selection from the persisted value.
-        _selectedLibraryProviderId = 'local';
+    const api = _libraryProviderApi();
+    if (api && typeof api.refresh === 'function') {
+        await api.refresh({ restoreSaved });
     }
 
     _renderLibraryProviderSelector();
@@ -1186,11 +1166,40 @@ async function loadLibraryProviders({ restoreSaved = false, reloadOnChange = fal
     }
 }
 
-function setLibraryProvider(providerId) {
-    if (!_providerById(providerId)) return;
-    if (_selectedLibraryProviderId === providerId) return;
-    _selectedLibraryProviderId = providerId;
-    _writePersistedChoice(_LIB_PROVIDER_KEY, providerId);
+async function setLibraryProvider(providerId, options = {}) {
+    const beforeProviderId = _activeLibraryProviderId();
+    try {
+        const capabilityApi = window.slopsmith && window.slopsmith.capabilities;
+        if (capabilityApi && typeof capabilityApi.command === 'function') {
+            await capabilityApi.command('library', 'select-provider', {
+                requester: 'app.library',
+                target: { providerId },
+                payload: options && typeof options === 'object' ? options : {},
+            });
+        } else {
+            _libraryProviderApi()?.select?.(String(providerId || ''));
+        }
+    } catch (err) {
+        // Reached from an inline onchange="setLibraryProvider(this.value)"
+        // handler that does not await us, so a rejection would otherwise
+        // surface as an unhandled promise rejection. Log and bail without a
+        // reload. Re-render the selector so the <select> snaps back to the
+        // still-active provider — the onchange already moved its displayed
+        // value to the (failed) selection, which would otherwise leave the
+        // dropdown showing a provider that was never actually selected.
+        console.error('setLibraryProvider: failed to select provider', providerId, err);
+        _renderLibraryProviderSelector();
+        return;
+    }
+    if (beforeProviderId === _activeLibraryProviderId()) {
+        // The active provider didn't change — either a genuine no-op, or the
+        // capability command degraded/no-op'd without throwing (e.g. an
+        // unknown provider returns a "degraded" outcome rather than rejecting).
+        // The inline onchange already moved the <select>'s displayed value, so
+        // re-render to snap it back to the provider that is actually active.
+        _renderLibraryProviderSelector();
+        return;
+    }
     _renderLibraryProviderSelector();
     _resetLibraryProviderViewState();
     loadLibrary(0);
@@ -3751,6 +3760,15 @@ function retuneSong(filename, title, tuning, target) {
 // ── Player ───────────────────────────────────────────────────────────────
 const audio = document.getElementById('audio');
 let isPlaying = false;
+let _lastSongPositionEventAt = 0;
+
+function _emitSongPositionChanged(time, duration) {
+    const now = Date.now();
+    if (now - _lastSongPositionEventAt < 250) return;
+    _lastSongPositionEventAt = now;
+    const payload = (typeof _songEventPayload === 'function') ? _songEventPayload() : { time };
+    window.slopsmith.emit('song:position-changed', Object.assign(payload, { duration }));
+}
 
 function _applyPreservePitch(el) {
     if (!el) return;
@@ -3826,6 +3844,7 @@ const jucePlayer = {
                 try {
                     self._pos = await window.slopsmithDesktop.audio.getBackingPosition();
                     self._pollAt = performance.now();
+                    _emitSongPositionChanged(self.currentTime, self.duration || null);
                 } catch (err) {
                     console.warn('[jucePlayer] position poll failed:', err);
                 } finally {
@@ -4317,7 +4336,9 @@ let _resetJuceAudioShimChain = function () {};
                 const sm = window.slopsmith;
                 if (sm) {
                     sm.isPlaying = true;
-                    sm.emit('song:play', _songEventPayload());
+                    const payload = _songEventPayload();
+                    sm.emit('song:play', payload);
+                    sm.emit('song:resume', payload);
                 }
             });
             return p.then(() => undefined);
@@ -4423,6 +4444,7 @@ async function _audioSeek(s, reason) {
     return _audioSeekChain;
 }
 let currentFilename = '';
+
 // Plugin context API — lightweight event bus for plugin integration
 // Preserve any namespace attached by earlier-loaded scripts (e.g.
 // diagnostics.js, slopsmith#166) so reassigning the root doesn't drop
@@ -4432,7 +4454,13 @@ let currentFilename = '';
 // hang their surfaces off the same namespace without coordinating
 // load order.
 const _slopsmithExisting = (typeof window.slopsmith === 'object' && window.slopsmith !== null) ? window.slopsmith : null;
-window.slopsmith = Object.assign(new EventTarget(), {
+const _slopsmithBus = (_slopsmithExisting
+    && typeof _slopsmithExisting.addEventListener === 'function'
+    && typeof _slopsmithExisting.removeEventListener === 'function'
+    && typeof _slopsmithExisting.dispatchEvent === 'function')
+    ? _slopsmithExisting
+    : new EventTarget();
+window.slopsmith = Object.assign(_slopsmithBus, {
     currentSong: null,
     isPlaying: false,
     _navParams: {},
@@ -4448,17 +4476,28 @@ window.slopsmith = Object.assign(new EventTarget(), {
     emit(event, detail) {
         this.dispatchEvent(new CustomEvent(event, { detail }));
     },
-    on(event, fn, options) { this.addEventListener(event, fn, options); },
+    on(event, fn, options) {
+        this.addEventListener(event, fn, options);
+    },
     off(event, fn, options) { this.removeEventListener(event, fn, options); },
     // Loop API — plugins should never reach for #btn-loop-* directly.
     // The script-scope `setLoop` and `clearLoop` are hoisted so these
     // method bodies resolve them lexically; `getLoop` reads the live
     // loopA/loopB bindings at call time.
-    setLoop(a, b) { return setLoop(a, b); },
-    clearLoop() { clearLoop(); },
-    getLoop() { return { loopA, loopB }; },
+    seek(seconds, reason, options) {
+        return _audioSeek(seconds, reason || 'plugin-command');
+    },
+    setLoop(a, b, options) {
+        return setLoop(a, b);
+    },
+    clearLoop(options) {
+        clearLoop();
+    },
+    getLoop(options) {
+        return { loopA, loopB };
+    },
 });
-if (_slopsmithExisting) {
+if (_slopsmithExisting && _slopsmithExisting !== window.slopsmith) {
     for (const key of Object.keys(_slopsmithExisting)) {
         if (!(key in window.slopsmith)) {
             window.slopsmith[key] = _slopsmithExisting[key];
@@ -4525,13 +4564,18 @@ audio.addEventListener('ended', () => {
     window.slopsmith.isPlaying = false;
     window.slopsmith.emit('song:ended', _songEventPayload());
 });
+audio.addEventListener('timeupdate', () => {
+    _emitSongPositionChanged(audio.currentTime, audio.duration || null);
+});
 audio.addEventListener('play', () => {
     // During a JUCE engine reroute the element is paused/played as a transparent
     // migration step — playback genuinely continues, so don't emit song:play or
     // flip slopsmith.isPlaying (the watcher keeps the canonical state itself).
     if (window._juceRerouteInProgress) return;
     window.slopsmith.isPlaying = true;
-    window.slopsmith.emit('song:play', _songEventPayload());
+    const payload = _songEventPayload();
+    window.slopsmith.emit('song:play', payload);
+    window.slopsmith.emit('song:resume', payload);
 });
 audio.addEventListener('pause', () => {
     if (!isPlaying) return;
@@ -4547,6 +4591,7 @@ let artAbortController = null;
 
 async function playSong(filename, arrangement) {
     console.log('playSong called:', filename);
+    window.slopsmith.emit('song:loading', { filename, arrangement: arrangement ?? null });
 
     // Cancel any pending art/metadata requests
     if (artAbortController) artAbortController.abort();
@@ -4626,6 +4671,7 @@ let _arrBusyTimeout = null;
 
 async function changeArrangement(index) {
     if (currentFilename) {
+        window.slopsmith.emit('song:arrangement-changed', { filename: currentFilename, arrangement: index });
         const wasPlaying = isPlaying;
         const time = _audioTime();
         if (isPlaying) {
@@ -4722,7 +4768,9 @@ async function changeArrangement(index) {
                     if (started) {
                         isPlaying = true;
                         window.slopsmith.isPlaying = true;
-                        window.slopsmith.emit('song:play', _songEventPayload());
+                        const payload = _songEventPayload();
+                        window.slopsmith.emit('song:play', payload);
+                        window.slopsmith.emit('song:resume', payload);
                     }
                 } else audio.play().then(() => { isPlaying = true; }).catch(() => {});
             }
@@ -4755,7 +4803,9 @@ async function togglePlay() {
             isPlaying = true;
             setPlayButtonState(true);
             window.slopsmith.isPlaying = true;
-            window.slopsmith.emit('song:play', _songEventPayload());
+            const payload = _songEventPayload();
+            window.slopsmith.emit('song:play', payload);
+            window.slopsmith.emit('song:resume', payload);
         }
         return;
     }
@@ -5179,6 +5229,19 @@ async function _populateVizPicker(plugins) {
     if (sel.value === 'auto') _autoMatchViz();
 }
 
+function _tagVizRenderer(renderer, id) {
+    if (!renderer || !id) return renderer;
+    try {
+        if (!renderer.pluginId) renderer.pluginId = id;
+        if (!renderer.source) renderer.source = id;
+    } catch (_) {}
+    return renderer;
+}
+
+function _installVizRenderer(renderer, id) {
+    highway.setRenderer(_tagVizRenderer(renderer, id));
+}
+
 function setViz(id) {
     // Helper: reset the UI and persisted selection to the built-in
     // "default" entry. Called whenever the requested viz can't be
@@ -5248,7 +5311,7 @@ function setViz(id) {
     }
     // Persist only once we know the renderer is valid.
     try { localStorage.setItem('vizSelection', id); } catch (_) {}
-    highway.setRenderer(renderer);
+    _installVizRenderer(renderer, id);
 }
 
 // Auto mode: evaluate each registered viz factory's static
@@ -5358,7 +5421,7 @@ function _autoMatchViz() {
             window.slopsmith.on('viz:renderer:ready', _onReady, { once: true });
             _cancelPendingAutoLabel = () => window.slopsmith.off('viz:renderer:ready', _onReady);
         }
-        highway.setRenderer(renderer);
+        _installVizRenderer(renderer, id);
         return;
     }
     // No match — restore the built-in 2D highway. setRenderer(null) is
@@ -5705,7 +5768,9 @@ async function startCountIn() {
                         isPlaying = true;
                         setPlayButtonState(true);
                         window.slopsmith.isPlaying = true;
-                        window.slopsmith.emit('song:play', _songEventPayload());
+                        const payload = _songEventPayload();
+                        window.slopsmith.emit('song:play', payload);
+                        window.slopsmith.emit('song:resume', payload);
                     }).catch((err) => console.error('[app] jucePlayer.play error:', err));
                 } else {
                     audio.play().then(() => {
@@ -6526,7 +6591,9 @@ function _removeLibCardsForFilename(filename) {
     _bumpLibNavGeneration();
 }
 
-async function syncLibrarySong(providerId, songId, { playWhenReady = false } = {}) {
+async function syncLibrarySong(providerId, songId, options = {}) {
+    const opts = options && typeof options === 'object' ? options : {};
+    const { playWhenReady = false } = opts;
     if (!providerId || !songId) return;
     const currentState = _librarySyncState(providerId, songId);
     if (currentState && currentState.status === 'synced' && currentState.localFilename) {
@@ -6536,13 +6603,20 @@ async function syncLibrarySong(providerId, songId, { playWhenReady = false } = {
     if (currentState && currentState.status === 'syncing') return null;
     _setLibrarySyncState(providerId, songId, { status: 'syncing' });
     try {
-        const response = await fetch(
-            `/api/library/providers/${encodeURIComponent(providerId)}/songs/${encodeURIComponent(songId)}/sync`,
-            { method: 'POST' },
-        );
-        let data = {};
-        try { data = await response.json(); } catch { data = {}; }
-        if (!response.ok) throw new Error(data.detail || data.error || `HTTP ${response.status}`);
+        const capabilityApi = window.slopsmith && window.slopsmith.capabilities;
+        let data = null;
+        if (capabilityApi && typeof capabilityApi.command === 'function') {
+            const result = await capabilityApi.command('library', 'sync-song', {
+                requester: 'app.library',
+                target: { providerId, songId },
+                payload: opts,
+            });
+            if (result.outcome !== 'handled') throw new Error(result.reason || 'Library provider sync failed');
+            data = result.payload && result.payload.result;
+        } else {
+            data = await _libraryProviderApi()?.syncSong?.(providerId, songId, opts);
+        }
+        if (!data) throw new Error('Library provider sync did not return a result');
         const localFilename = data.filename || data.localFilename || data.local_filename || data.playFilename || data.play_filename || '';
         const message = localFilename
             ? 'Ready to play'
@@ -6720,6 +6794,73 @@ async function checkScanAndLoad() {
 
 // ── Plugin loader ───────────────────────────────────────────────────────
 let _loadPluginsInFlight = false;
+const _pluginUiContributions = new Map();
+const CAPABILITY_INSPECTOR_NAV_SETTING = 'capability_inspector.showInPluginsMenu';
+
+function _capabilityInspectorNavEnabled() {
+    try { return localStorage.getItem(CAPABILITY_INSPECTOR_NAV_SETTING) === '1'; }
+    catch (_) { return false; }
+}
+
+// Derive a display label from a (possibly string) nav value. `/api/plugins`
+// can return `nav` as a plain string (manifest `"nav": "Declared"`) or an
+// object with a `.label`, and _pluginNav() may synthesize an object (e.g. the
+// Capability Inspector). Handle all three so string labels and the synthesized
+// label aren't dropped in favour of the plugin name.
+function _navLabel(nav, plugin) {
+    if (typeof nav === 'string' && nav.trim()) return nav;
+    if (nav && typeof nav === 'object' && nav.label) return nav.label;
+    return (plugin && (plugin.name || plugin.id)) || '';
+}
+
+function _pluginNav(plugin) {
+    if (!plugin || !plugin.id) return null;
+    if (plugin.id === 'capability_inspector') {
+        if (!_capabilityInspectorNavEnabled()) return null;
+        return plugin.nav || { label: 'Capabilities', screen: 'plugin-capability_inspector' };
+    }
+    return plugin.nav || null;
+}
+
+async function _commandUiDomain(domain, command, plugin, payload) {
+    try {
+        if (!window.slopsmith?.capabilities?.command) return;
+        await window.slopsmith.capabilities.command(domain, command, {
+            requester: plugin.id || 'plugin',
+            target: { id: payload.id, pluginId: plugin.id, region: payload.region },
+            payload: { ...payload, pluginId: plugin.id },
+        });
+    } catch (e) {
+        console.warn(`ui contribution ${command} failed for ${plugin.id}:`, e);
+    }
+}
+
+async function _registerLegacyPluginUiContributions(plugin) {
+    const previous = _pluginUiContributions.get(plugin.id) || [];
+    for (const contribution of previous) {
+        await _commandUiDomain(contribution.domain, 'unmount', plugin, contribution);
+    }
+    const contributions = [];
+    const nav = _pluginNav(plugin);
+    if (nav) {
+        contributions.push({ domain: 'ui.navigation', id: `${plugin.id}:nav`, region: 'plugins', label: _navLabel(nav, plugin), mounted: true });
+    }
+    if (plugin.has_screen) {
+        contributions.push({ domain: 'ui.plugin-screens', id: `${plugin.id}:screen`, region: 'plugin-screens', label: plugin.name || plugin.id, mounted: true });
+    }
+    if (plugin.has_settings) {
+        contributions.push({ domain: 'settings', id: `${plugin.id}:settings`, region: 'plugin-settings', label: plugin.name || plugin.id, mounted: true });
+    }
+    if (plugin.type === 'visualization') {
+        contributions.push({ domain: 'ui.player-overlays', id: `${plugin.id}:visualization`, region: 'visualization-picker', label: plugin.name || plugin.id, mounted: true });
+    }
+    contributions.sort((a, b) => `${a.domain}:${a.id}`.localeCompare(`${b.domain}:${b.id}`));
+    _pluginUiContributions.set(plugin.id, contributions);
+    for (const contribution of contributions) {
+        await _commandUiDomain(contribution.domain, 'register-contribution', plugin, contribution);
+        await _commandUiDomain(contribution.domain, 'mount', plugin, contribution);
+    }
+}
 
 async function loadPlugins() {
     if (_loadPluginsInFlight) { console.log('[slopsmith] loadPlugins: in-flight, skipping'); return null; }
@@ -6733,8 +6874,44 @@ async function loadPlugins() {
     const _savedMobileNav = mobileNavContainer ? mobileNavContainer.innerHTML : null;
     try {
         const resp = await fetch('/api/plugins');
-        plugins = await resp.json();
+        const fetchedPlugins = await resp.json();
+        const capabilityPlugins = fetchedPlugins.slice().sort((a, b) => String(a.id || '').localeCompare(String(b.id || '')));
+        plugins = fetchedPlugins.slice().sort((a, b) => {
+            const nameDelta = String(a.name || a.id || '').localeCompare(String(b.name || b.id || ''));
+            return nameDelta || String(a.id || '').localeCompare(String(b.id || ''));
+        });
+        const livePluginIds = new Set(plugins.map((plugin) => plugin.id));
+        for (const [pluginId, contributions] of _pluginUiContributions) {
+            if (livePluginIds.has(pluginId)) continue;
+            const stalePlugin = { id: pluginId };
+            for (const contribution of contributions) {
+                await _commandUiDomain(contribution.domain, 'unmount', stalePlugin, contribution);
+            }
+            try {
+                window.slopsmith?.capabilities?.unregisterParticipant?.(pluginId);
+            } catch (e) {
+                console.warn(`capability participant unregister failed for ${pluginId}:`, e);
+            }
+            _pluginUiContributions.delete(pluginId);
+        }
         console.log('[slopsmith] loadPlugins: got', plugins.length, 'plugins');
+
+        try {
+            const capabilityApi = window.slopsmith?.capabilities;
+            if (capabilityApi?.registerParticipants) {
+                capabilityApi.registerParticipants(capabilityPlugins);
+                if (capabilityApi.registerCompatibilityShim) {
+                    for (const plugin of capabilityPlugins) {
+                        for (const shim of Array.isArray(plugin.compatibility_shims) ? plugin.compatibility_shims : []) {
+                            capabilityApi.registerCompatibilityShim(shim);
+                        }
+                    }
+                }
+                capabilityApi.validateRuntime?.({ phase: 'plugin-manifest-load' });
+            }
+        } catch (e) {
+            console.warn('[slopsmith] capability manifest registration failed:', e);
+        }
 
         const settingsContainer = document.getElementById('plugin-settings');
 
@@ -6827,7 +7004,7 @@ async function loadPlugins() {
         }
 
         // Build plugin dropdown for desktop nav
-        const navPlugins = plugins.filter(p => p.nav);
+        const navPlugins = plugins.map(plugin => ({ plugin, nav: _pluginNav(plugin) })).filter(entry => entry.nav);
         if (navPlugins.length > 0) {
             const dropdown = document.createElement('div');
             dropdown.className = 'relative';
@@ -6857,7 +7034,7 @@ async function loadPlugins() {
                 });
             }
 
-            for (const plugin of navPlugins) {
+            for (const { plugin, nav } of navPlugins) {
                 const screenId = `plugin-${plugin.id}`;
                 // A plugin is navigable only once it's ready. While its deps
                 // install (status "installing") or after a failed load
@@ -6867,11 +7044,14 @@ async function loadPlugins() {
                 // (#421). Entries without a status (legacy / stub) are ready.
                 const status = plugin.status || 'ready';
                 const isReady = status === 'ready';
-                // nav is truthy here (navPlugins is filtered on p.nav), but a
-                // nav object can still omit `label` (e.g. a script-only plugin
-                // that declares an empty nav). Fall back to name/id so a
-                // missing label never renders "undefined" or throws.
-                const label = plugin.nav?.label ?? plugin.name ?? plugin.id;
+                // nav is truthy here (navPlugins is filtered on entry.nav), and
+                // is the computed value from _pluginNav() — which may be a
+                // string, an object that omits `label`, or a synthesized object
+                // (e.g. the Capability Inspector). _navLabel() normalizes all
+                // three and falls back to name/id so a missing label never
+                // renders "undefined" or throws. Use the loop's `nav`, not the
+                // raw `plugin.nav`, so string and synthesized labels survive.
+                const label = _navLabel(nav, plugin);
 
                 const item = document.createElement('a');
                 item.href = '#';
@@ -6926,6 +7106,7 @@ async function loadPlugins() {
             // Installing/failed plugins contribute only the disabled nav slot
             // built above — skip screen/settings/script injection for them.
             if (plugin.status && plugin.status !== 'ready') continue;
+            await _registerLegacyPluginUiContributions(plugin);
             const screenId = `plugin-${plugin.id}`;
 
             // Inject screen container. Skip for already-hydrated plugins —
@@ -7089,8 +7270,17 @@ async function loadPlugins() {
                         script.src = `/api/plugins/${plugin.id}/screen.js${v ? `?v=${v}` : ''}`;
                         script.dataset.pluginId = plugin.id;
                         script.dataset.pluginVersion = wantedVersion;
-                        script.onload = () => { loadedScripts.set(plugin.id, wantedVersion); resolve(); };
-                        script.onerror = (err) => { loadedScripts.delete(plugin.id); reject(err); };
+                        window.slopsmith._loadingPluginId = plugin.id;
+                        script.onload = () => {
+                            if (window.slopsmith._loadingPluginId === plugin.id) delete window.slopsmith._loadingPluginId;
+                            loadedScripts.set(plugin.id, wantedVersion);
+                            resolve();
+                        };
+                        script.onerror = (err) => {
+                            if (window.slopsmith._loadingPluginId === plugin.id) delete window.slopsmith._loadingPluginId;
+                            loadedScripts.delete(plugin.id);
+                            reject(err);
+                        };
                         document.body.appendChild(script);
                     });
                 }

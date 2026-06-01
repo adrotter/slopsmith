@@ -25,7 +25,8 @@
     "runtime_domains": { "type": "object", "propertyNames": { "$ref": "#/$defs/domainName" }, "additionalProperties": { "$ref": "#/$defs/domainDeclaration" } },
     "domains": { "type": "object", "propertyNames": { "$ref": "#/$defs/domainName" }, "additionalProperties": { "$ref": "#/$defs/domainDeclaration" } },
     "settings_schema": { "type": "object" },
-    "nav": {}, "screen": {}, "script": {}, "routes": {}, "settings": {}, "diagnostics": {}, "type": { "type": "string" }, "tour": {}
+    "nav": {}, "screen": {}, "script": {}, "routes": {}, "settings": {}, "diagnostics": {}, "type": { "type": "string" }, "tour": {},
+    "styles": { "type": "string", "minLength": 1, "pattern": "^assets/(?!.*\\.\\.)[^\\\\?#]+$", "description": "Plugin-root-relative path under assets/ (e.g. 'assets/plugin.css') to a compiled, preflight-off Tailwind stylesheet the frontend injects as a <link>. Must stay under assets/ with no '..', backslash, or query/fragment. See docs/plugin-styles.md." }
   },
   "additionalProperties": true,
   "$defs": {

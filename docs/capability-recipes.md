@@ -2,6 +2,8 @@
 
 Use these examples as small manifest fragments when migrating plugin-facing integrations to capability pipelines. The capability model is system-wide; these recipes focus on plugin manifests because core-owned domains are registered by Slopsmith itself. Each example is intentionally complete enough to pass the loader contract in [plugin-manifest.schema.json](plugin-manifest.schema.json).
 
+> **Self-hosted CSS?** If your plugin uses Tailwind classes core doesn't ship (notably arbitrary values like `text-[11px]`), declare a `styles` key and bundle your own preflight-off stylesheet — see [plugin-styles.md](plugin-styles.md). That is separate from the capability-pipeline recipes below.
+
 ## Owner And Provider
 
 A plugin that owns a domain and handles commands declares `owner` and `provider`. Use this for a single canonical implementation in a plugin-owned domain, such as a future stem-control capability.

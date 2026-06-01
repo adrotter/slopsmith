@@ -2863,6 +2863,57 @@ def test_list_plugins_includes_has_tour(tour_client):
     assert ids["no_tour"]["has_tour"] is False
 
 
+def test_nav_entry_derives_has_styles_from_manifest(tmp_path, reset_plugin_state):
+    """The real loader must derive has_styles + carry the styles path from the
+    manifest WITHOUT importing plugin code (mirrors has_screen/has_tour)."""
+    plugins = reset_plugin_state
+    styled = _make_plugin(tmp_path, "styled")
+    (styled / "plugin.json").write_text(json.dumps(
+        {"id": "styled", "name": "Styled", "routes": "routes.py",
+         "styles": "assets/plugin.css"}))
+    _make_plugin(tmp_path, "plain")  # no styles key
+
+    _run_load_plugins(plugins, type("FakeApp", (), {})(), tmp_path)
+
+    by_id = {p["id"]: p for p in plugins.LOADED_PLUGINS}
+    assert by_id["styled"]["has_styles"] is True
+    assert by_id["styled"]["styles"] == "assets/plugin.css"
+    assert by_id["plain"]["has_styles"] is False
+    assert by_id["plain"]["styles"] is None
+
+
+def test_list_plugins_surfaces_has_styles_and_path(tmp_path, reset_plugin_state):
+    """GET /api/plugins must surface has_styles + styles for each plugin so the
+    frontend can build the <link> URL; a plugin without styles → False/None."""
+    plugins = reset_plugin_state
+    plugin_dir = tmp_path / "dummy"
+    plugin_dir.mkdir()
+    plugins.LOADED_PLUGINS.append({
+        "id": "with_styles", "name": "With Styles", "nav": None, "type": None,
+        "has_screen": False, "has_script": False, "has_settings": False,
+        "has_tour": False, "has_styles": True, "styles": "assets/plugin.css",
+        "_dir": plugin_dir, "_manifest": {},
+    })
+    plugins.LOADED_PLUGINS.append({
+        "id": "no_styles", "name": "No Styles", "nav": None, "type": None,
+        "has_screen": False, "has_script": False, "has_settings": False,
+        "has_tour": False, "_dir": plugin_dir, "_manifest": {},
+    })
+
+    client = _make_api_client(plugins)
+    try:
+        r = client.get("/api/plugins")
+        assert r.status_code == 200
+        ids = {p["id"]: p for p in r.json()}
+        assert ids["with_styles"]["has_styles"] is True
+        assert ids["with_styles"]["styles"] == "assets/plugin.css"
+        # A stubbed entry without the keys falls back cleanly (no KeyError).
+        assert ids["no_styles"]["has_styles"] is False
+        assert ids["no_styles"]["styles"] is None
+    finally:
+        client.close()
+
+
 def test_list_plugins_version_field(tmp_path, reset_plugin_state):
     """GET /api/plugins must include a `version` field for each plugin.
 
@@ -3260,6 +3311,7 @@ def asset_client(tmp_path, reset_plugin_state):
     plugin_dir = tmp_path / "stems"
     (plugin_dir / "assets" / "sub").mkdir(parents=True)
     (plugin_dir / "assets" / "worklet.js").write_text("registerProcessor('x', class {});\n")
+    (plugin_dir / "assets" / "plugin.css").write_text(".x-[11px]{font-size:11px}\n")
     (plugin_dir / "assets" / "sub" / "data.bin").write_bytes(b"\x00\x01\x02")
     # A sibling Python module OUTSIDE assets/ that must never be reachable.
     (plugin_dir / "routes.py").write_text("SECRET = 1\n")
@@ -3290,6 +3342,14 @@ def test_plugin_asset_serves_bundled_file(asset_client):
     assert r.status_code == 200
     assert r.text == "registerProcessor('x', class {});\n"
     assert "javascript" in r.headers["content-type"]
+
+
+def test_plugin_asset_serves_css_as_stylesheet(asset_client):
+    """A plugin's `styles` CSS under assets/ must serve as text/css so a
+    <link rel=stylesheet> (the styles capability) is honoured by the browser."""
+    r = asset_client.get("/api/plugins/stems/assets/plugin.css")
+    assert r.status_code == 200
+    assert "text/css" in r.headers["content-type"]
 
 
 def test_plugin_asset_serves_nested_file(asset_client):

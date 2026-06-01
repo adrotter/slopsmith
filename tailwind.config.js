@@ -13,10 +13,16 @@
 module.exports = {
     content: [
         './static/**/*.{html,js}',
-        './plugins/**/static/**/*.{html,js}',
-        './plugins/**/screen.js',
-        './plugins/**/settings.html',
-        './plugins/**/*.html',
+        // One recursive plugin glob subsumes the previous four narrow ones
+        // (static/**, screen.js, settings.html, *.html) and additionally
+        // scans plugin .js files that aren't screen.js (e.g.
+        // plugins/app_tour_*/script.js), closing a silent coverage hole.
+        './plugins/**/*.{js,html}',
+        // highway_3d owns its styles via the `styles` capability (it ships
+        // plugins/highway_3d/assets/plugin.css, preflight off), so core no
+        // longer scans it — its arbitrary values live in its own sheet, not
+        // core's. Pilot for decentralizing all bundled plugins' CSS.
+        '!./plugins/highway_3d/**',
     ],
     theme: {
         extend: {

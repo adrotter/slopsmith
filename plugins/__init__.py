@@ -1080,6 +1080,14 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
             "has_script": bool(manifest.get("script")),
             "has_settings": bool(manifest.get("settings")),
             "has_tour": _is_valid_tour_manifest(manifest.get("tour")),
+            # `styles` is an optional relpath (under the plugin's assets/) to a
+            # compiled, preflight-off stylesheet the frontend injects as a
+            # <link> so runtime-installed plugins style correctly without core
+            # rescanning them at build time (Principle II). `has_styles` mirrors
+            # the other manifest-only booleans; `styles` carries the path so the
+            # client can build the asset URL without a second manifest read.
+            "has_styles": bool(manifest.get("styles")),
+            "styles": manifest.get("styles"),
             "standards": _normalize_string_list(manifest.get("standards")),
             "capabilities": _validated_capabilities,
             "capability_validation_warnings": _capability_validation_warnings,
@@ -1679,6 +1687,10 @@ def register_plugin_api(app: FastAPI):
                 "has_script": p["has_script"],
                 "has_settings": p["has_settings"],
                 "has_tour": p.get("has_tour", False),
+                # `.get()` fallbacks keep stubbed test entries (built without
+                # _nav_entry) working — styles is None when unset.
+                "has_styles": p.get("has_styles", False),
+                "styles": p.get("styles"),
                 # capability-pipelines.v1 metadata, computed once by
                 # _nav_entry() at discovery and carried through graduation.
                 # The `.get()` fallbacks keep stubbed test entries (which build
@@ -1714,6 +1726,8 @@ def register_plugin_api(app: FastAPI):
                 "has_script": e.get("has_script", False),
                 "has_settings": e.get("has_settings", False),
                 "has_tour": e.get("has_tour", False),
+                "has_styles": e.get("has_styles", False),
+                "styles": e.get("styles"),
                 # Pending entries are built from _nav_entry() too, so they
                 # carry the same capability-pipelines.v1 metadata — surface it
                 # so the Inspector can show still-installing plugins.
@@ -1899,6 +1913,11 @@ def register_plugin_api(app: FastAPI):
                     # accept it; guess_type can miss this on some platforms.
                     if media_type is None and target.suffix == ".js":
                         media_type = "application/javascript"
+                    # .css must come back as text/css so a <link rel=stylesheet>
+                    # (the styles capability) is honoured; guess_type can miss it
+                    # on a stripped platform mimetypes registry, same as .js.
+                    elif media_type is None and target.suffix == ".css":
+                        media_type = "text/css"
                     return FileResponse(target, media_type=media_type or "application/octet-stream")
                 break
         return Response("", status_code=404)

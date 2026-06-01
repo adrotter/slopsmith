@@ -2,7 +2,9 @@
 
 This guide tells future AI assistants where each visual element lives in `screen.js`, what controls it, and the gotchas to watch for. The goal is for small polishes (color tweaks, sizing, animation timing, add/remove a label) to land in the right place on the first try without grep spelunking.
 
-The whole plugin is **one file** — `screen.js`, wrapped in an IIFE, registered as `window.slopsmithViz_highway_3d` (a slopsmith#36 setRenderer factory). No build step, no imports beyond Three.js loaded from the vendored `/static/vendor/three/three.module.min.js` (pinned r170; swapped from CDN when bundled into core).
+The whole renderer is **one file** — `screen.js`, wrapped in an IIFE, registered as `window.slopsmithViz_highway_3d` (a slopsmith#36 setRenderer factory). No imports beyond Three.js loaded from the vendored `/static/vendor/three/three.module.min.js` (pinned r170; swapped from CDN when bundled into core).
+
+**Styling (slopsmith `styles` capability).** This plugin owns its Tailwind CSS: it ships `assets/plugin.css` and declares `"styles": "assets/plugin.css"` in `plugin.json`, so core's prebuilt `static/tailwind.min.css` no longer scans it (it's excluded from core's content globs). The frontend injects `assets/plugin.css` as a `<link>` when the renderer activates. This is the one maintainer-time build step: after you add/change a Tailwind class in `screen.js` or `settings.html`, run `bash build-tailwind.sh` (pinned `tailwindcss@3.4.19`, `corePlugins.preflight=false` — utilities only) and **bump the `version` in `plugin.json`** so the injected `<link>`'s `?v=` cache-buster fetches the fresh file. The generated `assets/plugin.css` is committed; end users never build. See [docs/plugin-styles.md](../../docs/plugin-styles.md).
 
 > **Navigation note:** This guide references functions by name and uses the existing banner comments (`/* ── Scene initialisation ─ */`, etc.) as section anchors. Line numbers are deliberately avoided so this stays correct as the file evolves. Use `Grep` for the function name or banner text to jump to a section.
 

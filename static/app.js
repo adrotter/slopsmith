@@ -6949,6 +6949,87 @@ async function loadPlugins() {
                 if (s.dataset.pluginId === pluginId) s.remove();
             });
         };
+        // Mirror of loadedScripts for the plugin `styles` capability: a single
+        // versioned <link rel=stylesheet> per plugin lives in <head>, deduped by
+        // id → version so an upgrade swaps it and re-activation doesn't pile up
+        // duplicate tags. The <link> covers both the plugin's screen and its
+        // settings panel. Plugins ship preflight-off (utilities only) CSS, so a
+        // stylesheet that lingers after deactivation can't bleed a base reset.
+        let loadedStyles = window.slopsmith._loadedPluginStyles;
+        if (!(loadedStyles instanceof Map)) {
+            loadedStyles = new Map();
+            window.slopsmith._loadedPluginStyles = loadedStyles;
+        }
+        const _removePluginStyleTags = (pluginId) => {
+            // Same dataset-filter rationale as _removePluginScriptTags.
+            document.querySelectorAll('link[data-plugin-id]').forEach((l) => {
+                if (l.dataset.pluginId === pluginId) l.remove();
+            });
+        };
+        const _injectPluginStyles = (plugin) => {
+            // Tear down a <link> we injected earlier this session when the plugin
+            // no longer ships a usable stylesheet — upgraded to drop `styles`, or
+            // to an invalid path — so stale CSS can't keep applying after the
+            // plugin disabled its styling.
+            const teardownStale = () => {
+                if (loadedStyles.has(plugin.id)) {
+                    _removePluginStyleTags(plugin.id);
+                    loadedStyles.delete(plugin.id);
+                }
+            };
+            if (!plugin.has_styles || !plugin.styles) { teardownStale(); return; }
+            // `styles` is a plugin-root-relative path (like screen/script/routes)
+            // and must live under assets/ so it serves through the sandboxed
+            // asset route — e.g. "assets/plugin.css". Reject anything that can't
+            // reach a served file or would build a malformed URL: not under
+            // assets/, a `..` traversal segment, a backslash, or a `?`/`#` that
+            // would collide with the cache-busting query we append. The server
+            // also enforces containment via safe_join — this just avoids the
+            // wasted 404 and matches the documented contract.
+            const path = String(plugin.styles).replace(/^\/+/, '');
+            const unsafe = !path.startsWith('assets/')
+                || /(^|\/)\.\.(\/|$)/.test(path)
+                || /[\\?#]/.test(path);
+            if (unsafe) {
+                console.warn(`Plugin ${plugin.id}: styles must be a path under assets/ with no "..", backslash, or query/fragment (got "${plugin.styles}") — skipping`);
+                teardownStale();
+                return;
+            }
+            const wantedVersion = plugin.version || '';
+            // Idempotent: same id+version already injected → nothing to do.
+            if (loadedStyles.get(plugin.id) === wantedVersion) return;
+            // A different version (or none) was loaded — drop the prior <link>
+            // so we never accumulate stale stylesheets across upgrades.
+            _removePluginStyleTags(plugin.id);
+            const link = document.createElement('link');
+            link.rel = 'stylesheet';
+            link.dataset.pluginId = plugin.id;
+            link.dataset.pluginVersion = wantedVersion;
+            // Version in the URL (the plugin `version`, mirroring the screen.js
+            // loader's ?v= convention) so a plugin upgrade within one session
+            // fetches fresh CSS instead of a copy cached by path alone.
+            const v = encodeURIComponent(wantedVersion);
+            link.href = `/api/plugins/${plugin.id}/${path}${v ? `?v=${v}` : ''}`;
+            document.head.appendChild(link);
+            loadedStyles.set(plugin.id, wantedVersion);
+        };
+        const _reconcilePluginStyles = (currentPlugins) => {
+            // Drop stylesheets for plugins that vanished from /api/plugins or are
+            // no longer ready+styled this round. _injectPluginStyles below only
+            // visits plugins still returned by the API, so an uninstalled or
+            // newly-not-ready plugin would otherwise keep its <link> applying.
+            const styled = new Set(
+                currentPlugins
+                    .filter((p) => (p.status || 'ready') === 'ready' && p.has_styles && p.styles)
+                    .map((p) => p.id),
+            );
+            for (const id of Array.from(loadedStyles.keys())) {
+                if (!styled.has(id)) {
+                    _removePluginStyleTags(id);
+                    loadedStyles.delete(id);
+                }
+            }
+        };
         const existingSettingsByPluginId = new Map();
         if (settingsContainer) {
             for (const child of settingsContainer.children) {
@@ -7099,6 +7180,10 @@ async function loadPlugins() {
             }
         }
 
+        // Tear down stylesheets for plugins that are gone / no longer styled
+        // before (re)injecting for the current set.
+        _reconcilePluginStyles(plugins);
+
         for (const plugin of plugins) {
             try {
             // Only ready plugins have their assets available (the backend
@@ -7108,6 +7193,11 @@ async function loadPlugins() {
             if (plugin.status && plugin.status !== 'ready') continue;
             await _registerLegacyPluginUiContributions(plugin);
             const screenId = `plugin-${plugin.id}`;
+
+            // Inject the plugin's stylesheet FIRST (before screen HTML/JS) so
+            // its utilities are present on first paint. Idempotent + version-
+            // deduped, so it's safe to call for already-hydrated plugins too.
+            _injectPluginStyles(plugin);
 
             // Inject screen container. Skip for already-hydrated plugins —
             // their existing screen DOM still has the listeners that

@@ -37,13 +37,13 @@ The audio graph/session slice promotes these domains after PR1:
 
 `core.audio.session` is the runtime coordinator for all four domains. It owns `audio-mix`, `audio-input`, and `audio-monitoring`; for `stems`, it coordinates the active Stems provider without replacing the Stems plugin as the owner of actual stem playback/state.
 
-This slice intentionally does not replace every legacy audio API. In particular, `window.slopsmith.audio.registerFader(...)` remains the executable mixer UI/control surface until a focused audio-mix control-plane slice adds command handlers, provider operations, committed-value events, and compatibility removal gates.
+The focused audio-mix control-plane slice promotes fader discovery, read/write operations, committed-value events, native-over-legacy duplicate handling, route/analyser inspection, and compatibility removal gates into `audio-mix`. During migration, `window.slopsmith.audio.registerFader(...)` remains available as a compatibility adapter, but the player mixer consumes the audio-mix control plane as its source of truth.
 
 ## Recommended Next Slices
 
 The plugin inventory suggests this migration order after the audio graph/session slice:
 
-1. `audio-mix` control plane: make faders executable through capability commands and provider operations so `registerFader(...)` can become a compatibility wrapper only.
+1. `audio-mix` control plane: make faders executable through capability commands and provider operations so `registerFader(...)` can become a compatibility wrapper only. This is the active 005 migration slice.
 2. `playback`: replace `window.playSong`/transport wrapper chains with transport commands, media snapshot access, and lifecycle events.
 3. `jobs`: coordinate conversion, import, update, preview, and studio work with progress, cancellation, retry, and terminal failure semantics.
 4. `note-detection`: formalize note-state providers, calibration diagnostics, audio-input coupling, and hit/miss event flow.

@@ -39,3 +39,7 @@ playwright-report/
 /dlc
 
 .vscode
+Thumbs.db
+*.tmp
+*.swp
+.idea/

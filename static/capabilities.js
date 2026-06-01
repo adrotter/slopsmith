@@ -1295,6 +1295,7 @@
             target: source.target || source.args?.target || null,
             payload: source.args || source.payload || {},
             claim: source.claim,
+            timeoutMs: source.timeoutMs || (capability === 'audio-mix' && (commandName === 'get-fader-value' || commandName === 'set-fader-value') ? 2100 : undefined),
         });
         const status = _dispatchStatus(result);
         _emitEvent(capability, 'dispatched', { command: commandName, status, result, source: source.source || source.requester || 'dispatch' });

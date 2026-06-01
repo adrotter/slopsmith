@@ -27,14 +27,39 @@ function _audioSession() {
     return window.slopsmith && window.slopsmith.audioSession;
 }
 
+function _capabilities() {
+    return window.slopsmith && window.slopsmith.capabilities;
+}
+
+async function _mixCommand(command, payload) {
+    const api = _capabilities();
+    if (api && typeof api.command === 'function') {
+        return api.command('audio-mix', command, {
+            requester: 'core.audio-mixer',
+            origin: 'player-ui',
+            payload: payload || {},
+            timeoutMs: 2100,
+        });
+    }
+    const session = _audioSession();
+    if (!session) return { outcome: 'no-owner', reason: 'audio-mix is unavailable' };
+    if (command === 'list-faders' && typeof session.listFaders === 'function') return session.listFaders();
+    if (command === 'get-fader-value' && typeof session.getFaderValue === 'function') return session.getFaderValue(payload || {});
+    if (command === 'set-fader-value' && typeof session.setFaderValue === 'function') return session.setFaderValue(payload || {});
+    return { outcome: 'unsupported-command', reason: `Unsupported audio-mix command: ${command}` };
+}
+
 function _registerAudioSessionFader(spec, currentValue, compatibilitySource) {
     const session = _audioSession();
     if (!session || typeof session.registerMixParticipant !== 'function') return;
+    const isSong = spec.id === 'song';
     session.registerMixParticipant({
-        participantId: spec.id === 'song' ? 'core.song' : `fader.${spec.id}`,
-        ownerPluginId: spec.id === 'song' ? 'core' : spec.id,
+        participantId: isSong ? 'core.song' : `fader.${spec.id}`,
+        ownerPluginId: isSong ? 'core' : (spec.ownerPluginId || spec.id),
         label: spec.label || spec.id,
-        kind: spec.id === 'song' ? 'song' : 'plugin',
+        kind: isSong ? 'song' : (spec.kind || 'plugin'),
+        sourceMode: isSong ? 'core' : 'compatibility',
+        logicalFaderKey: spec.logicalFaderKey || (isSong ? 'core.song:volume' : `${spec.id}:${spec.id}`),
         fader: {
             id: spec.id,
             label: spec.label || spec.id,
@@ -44,8 +69,14 @@ function _registerAudioSessionFader(spec, currentValue, compatibilitySource) {
             step: spec.step,
             defaultValue: spec.defaultValue,
             currentValue,
+            getValue: spec.getValue,
+            setValue: spec.setValue,
         },
         operations: ['fader.get-value', 'fader.set-value'],
+        operationHandlers: {
+            'fader.get-value': spec.getValue,
+            'fader.set-value': spec.setValue,
+        },
         availability: 'available',
         compatibilitySource,
     });
@@ -197,6 +228,9 @@ function registerFader(spec) {
         max,
         step,
         defaultValue: Math.min(max, Math.max(min, dv)),
+        logicalFaderKey: typeof spec.logicalFaderKey === 'string' ? spec.logicalFaderKey : undefined,
+        ownerPluginId: typeof spec.ownerPluginId === 'string' ? spec.ownerPluginId : undefined,
+        kind: typeof spec.kind === 'string' ? spec.kind : undefined,
         getValue: spec.getValue,
         setValue: spec.setValue,
     };
@@ -246,29 +280,30 @@ function _formatValue(v, unit) {
     return unit ? s + unit : s;
 }
 
+function _legacyFaderForSummary(summary) {
+    if (!summary) return null;
+    return _faders.get(summary.id) || _faders.get(summary.faderId) || null;
+}
+
 function _clampToSpec(v, spec) {
     return Math.min(spec.max, Math.max(spec.min, v));
 }
 
 function _strip(spec) {
-    let cur = spec.defaultValue;
-    try {
-        const got = Number(spec.getValue());
-        if (Number.isFinite(got)) cur = got;
-    } catch (e) {
-        console.error('[mixer] getValue threw', spec.id, e);
-    }
-    // Clamp the initial value to [min,max] so the slider and display agree
-    // even when getValue() returns an out-of-range value.
+    let cur = Number.isFinite(Number(spec.currentValue)) ? Number(spec.currentValue) : spec.defaultValue;
     cur = _clampToSpec(cur, spec);
+    const faderKey = spec.faderKey || `${spec.participantId}:${spec.faderId || spec.id}`;
+    const available = spec.availability === 'available' && spec.userAdjustable !== false;
+    let writeSeq = 0; // guards against out-of-order set-fader-value responses reverting newer input
 
     const wrap = document.createElement('div');
     wrap.className = 'mixer-strip';
+    wrap.setAttribute('data-fader-key', faderKey);
 
     const labelEl = document.createElement('span');
     labelEl.className = 'mixer-strip-label';
-    labelEl.title = spec.label;
-    labelEl.textContent = spec.label;
+    labelEl.title = spec.label || spec.faderLabel;
+    labelEl.textContent = spec.label || spec.faderLabel;
 
     const slider = document.createElement('input');
     slider.type = 'range';
@@ -277,12 +312,14 @@ function _strip(spec) {
     slider.max = String(spec.max);
     slider.step = String(spec.step);
     slider.value = String(cur);
-    slider.setAttribute('aria-label', spec.label + ' volume');
+    slider.disabled = !available;
+    slider.setAttribute('aria-label', (spec.label || spec.faderLabel) + ' volume');
+    if (!available) slider.setAttribute('aria-disabled', 'true');
     window.handleSliderInput?.(slider); //initialize the slider's background fill based on the initial value
 
     const valueEl = document.createElement('span');
     valueEl.className = 'mixer-strip-value';
-    valueEl.textContent = _formatValue(cur, spec.unit);
+    valueEl.textContent = available ? _formatValue(cur, spec.unit) : 'Unavailable';
 
     slider.addEventListener('keydown', (e) => {
         if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' ||
@@ -297,27 +334,32 @@ function _strip(spec) {
     });
 
     slider.addEventListener('input', () => {
+        if (slider.disabled) return;
+        const seq = ++writeSeq;
         const parsed = parseFloat(slider.value);
         const requested = Number.isFinite(parsed) ? parsed : cur;
-        let actual = requested;
-        try {
-            spec.setValue(requested);
-        } catch (e) {
-            console.error('[mixer] setValue threw', spec.id, e);
-        }
-        // Re-read the actual committed value so the display tracks what
-        // the implementation really applied (e.g. internal clamping/rounding).
-        try {
-            const got = Number(spec.getValue());
-            if (Number.isFinite(got)) actual = got;
-        } catch (e) {
-            console.error('[mixer] getValue threw', spec.id, e);
-        }
-        actual = _clampToSpec(actual, spec);
-        cur = actual;
-        slider.value = String(actual);
-        window.handleSliderInput?.(slider); //update the slider's background fill on input
-        valueEl.textContent = _formatValue(actual, spec.unit);
+        valueEl.textContent = 'Pending';
+        _mixCommand('set-fader-value', {
+            participantId: spec.participantId,
+            faderId: spec.faderId || spec.id,
+            value: requested,
+        }).then(result => {
+            if (seq !== writeSeq) return; // a newer input superseded this response
+            const payload = result && result.payload ? result.payload : {};
+            const actual = Number.isFinite(Number(payload.committedValue)) ? Number(payload.committedValue) : cur;
+            cur = _clampToSpec(actual, spec);
+            slider.value = String(cur);
+            window.handleSliderInput?.(slider); //update the slider's background fill on input
+            valueEl.textContent = result && result.outcome === 'handled' ? _formatValue(cur, spec.unit) : 'Failed';
+            if (result && result.outcome !== 'handled') slider.classList.add('mixer-strip-fader-failed');
+        }).catch(err => {
+            if (seq !== writeSeq) return; // a newer input superseded this response
+            console.error('[mixer] audio-mix set-fader-value failed', spec.id, err);
+            slider.value = String(cur);
+            window.handleSliderInput?.(slider);
+            valueEl.textContent = 'Failed';
+            slider.classList.add('mixer-strip-fader-failed');
+        });
     });
 
     wrap.appendChild(labelEl);
@@ -331,17 +373,53 @@ function _renderPopover() {
     _popoverEl.innerHTML = '';
     const row = document.createElement('div');
     row.className = 'mixer-row';
-    if (_faders.size === 0) {
-        const empty = document.createElement('span');
-        empty.className = 'text-xs text-gray-500';
-        empty.textContent = 'No audio sources';
-        row.appendChild(empty);
-    } else {
-        for (const spec of _faders.values()) {
-            row.appendChild(_strip(spec));
-        }
-    }
     _popoverEl.appendChild(row);
+
+    _mixCommand('list-faders').then(result => {
+        row.innerHTML = '';
+        const faders = result && result.payload && Array.isArray(result.payload.faders) ? result.payload.faders : [];
+        if (faders.length === 0) {
+            for (const legacy of _faders.values()) faders.push({ ...legacy, currentValue: legacy.defaultValue, participantId: legacy.id === 'song' ? 'core.song' : `fader.${legacy.id}`, faderId: legacy.id, availability: 'available', userAdjustable: true });
+        }
+        if (faders.length === 0) {
+            const empty = document.createElement('span');
+            empty.className = 'text-xs text-gray-500';
+            empty.textContent = 'No audio sources';
+            row.appendChild(empty);
+            return;
+        }
+        for (const fader of faders) {
+            const legacy = _legacyFaderForSummary(fader);
+            const spec = legacy ? { ...legacy, ...fader, id: fader.faderId || fader.id } : { ...fader, id: fader.faderId || fader.id, label: fader.label || fader.faderLabel };
+            row.appendChild(_strip(spec));
+            if (fader.availability === 'available') {
+                _mixCommand('get-fader-value', { participantId: fader.participantId, faderId: fader.faderId || fader.id }).then(valueResult => {
+                    if (!valueResult || valueResult.outcome !== 'handled' || !_open) return;
+                    const fresh = valueResult.payload;
+                    const strip = row.children && Array.from(row.children).find(child => child.getAttribute && child.getAttribute('data-fader-key') === (fresh.faderKey || `${fresh.participantId}:${fresh.faderId || fresh.id}`));
+                    if (!strip || !strip.children || strip.children.length < 3) return;
+                    const slider = strip.children[1];
+                    const valueEl = strip.children[2];
+                    const committed = Number(fresh.committedValue ?? fresh.currentValue);
+                    if (!Number.isFinite(committed)) return;
+                    slider.value = String(_clampToSpec(committed, spec));
+                    window.handleSliderInput?.(slider);
+                    valueEl.textContent = _formatValue(Number(slider.value), spec.unit);
+                }).catch(() => {});
+            }
+        }
+    }).catch(err => {
+        console.error('[mixer] audio-mix list-faders failed', err);
+        row.innerHTML = '';
+        if (_faders.size === 0) {
+            const empty = document.createElement('span');
+            empty.className = 'text-xs text-gray-500';
+            empty.textContent = 'No audio sources';
+            row.appendChild(empty);
+            return;
+        }
+        for (const spec of _faders.values()) row.appendChild(_strip({ ...spec, participantId: spec.id === 'song' ? 'core.song' : `fader.${spec.id}`, faderId: spec.id, currentValue: spec.defaultValue, availability: 'available', userAdjustable: true }));
+    });
 }
 
 function _onDocKeydown(e) {
@@ -419,6 +497,10 @@ function _init() {
     _registerSongFader();
     if (window.slopsmith && window.slopsmith.on) {
         window.slopsmith.on('screen:changed', _onScreenChanged);
+        window.slopsmith.on('audio-mix:fader-value-changed', () => { if (_open) _renderPopover(); });
+        window.slopsmith.on('audio-mix:fader-unavailable', () => { if (_open) _renderPopover(); });
+        window.slopsmith.on('audio-mix:participant-registered', () => { if (_open) _renderPopover(); });
+        window.slopsmith.on('audio-mix:participant-removed', () => { if (_open) _renderPopover(); });
     }
     window.dispatchEvent(new Event('slopsmith:audio:ready'));
 }

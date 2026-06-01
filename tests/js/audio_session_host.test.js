@@ -77,3 +77,46 @@ test('disabled missing incompatible unsupported and timeout paths are diagnosabl
     assert.equal(timedOut.outcome, 'failed');
     assert.match(timedOut.reason, /timed out/i);
 });
+
+test('audio-mix diagnostics include faders routes analysers bridge hits and redacted outcomes', async () => {
+    const window = loadAudioSession();
+    const api = window.slopsmith.capabilities;
+    const audioSession = window.slopsmith.audioSession;
+    audioSession.startSession({ sessionId: 'main:/Users/example/DLC/song.psarc', songKey: '/Users/example/DLC/song.psarc' });
+    audioSession.setRoute({ routeKind: 'desktop', availability: 'degraded', deviceLabel: 'Secret Studio Output', fallbackReason: 'fallback token=abc123 at /Users/example/device' });
+    audioSession.setAnalyser({ source: 'plugin', availability: 'available', participantId: 'plugin.visualizer', reason: 'ok', rawFft: [1, 2, 3] });
+    audioSession.recordBridgeHit({ domain: 'audio-mix', bridgeId: 'audio-mix.fader-registry', legacySurface: 'registerFader', participantId: 'legacy.delay', outcome: 'failed', reason: 'password=abc path /Users/example/plugin' });
+
+    await api.dispatch({
+        capability: 'audio-mix',
+        command: 'register-participant',
+        source: 'test',
+        payload: {
+            participantId: 'plugin.delay',
+            ownerPluginId: 'delay',
+            label: 'Delay',
+            kind: 'plugin',
+            sourceMode: 'native',
+            fader: { id: 'wet', label: 'Wet', min: 0, max: 1, step: 0.1, defaultValue: 0.5, currentValue: 0.5 },
+            operations: ['fader.get-value', 'fader.set-value'],
+            operationHandlers: { 'fader.set-value': () => { throw new Error('failed near /Users/example/secret token=abc'); } },
+        },
+    });
+    const failed = await api.dispatch({ capability: 'audio-mix', command: 'set-fader-value', source: 'test', payload: { participantId: 'plugin.delay', faderId: 'wet', value: 0.7 } });
+    const route = await api.dispatch({ capability: 'audio-mix', command: 'inspect-route', source: 'test' });
+    const analyser = await api.dispatch({ capability: 'audio-mix', command: 'inspect-analyser', source: 'test' });
+    const snapshot = audioSession.snapshot();
+    const encoded = JSON.stringify(snapshot);
+
+    assert.equal(failed.outcome, 'failed');
+    assert.equal(route.payload.routeKind, 'desktop');
+    assert.equal(analyser.payload.source, 'plugin');
+    assert.equal(snapshot.domains['audio-mix'].faders.some(fader => fader.participantId === 'plugin.delay' && fader.sourceMode === 'native'), true);
+    assert.equal(snapshot.domains['audio-mix'].bridges.some(bridge => bridge.bridgeId === 'audio-mix.fader-registry' && bridge.outcome === 'failed'), true);
+    assert.equal(snapshot.recentOutcomes.some(outcome => outcome.operation === 'set-fader-value' && outcome.faderId === 'wet' && outcome.outcome === 'failed'), true);
+    assert.equal(encoded.includes('rawFft'), false);
+    assert.equal(encoded.includes('Secret Studio Output'), false);
+    assert.equal(encoded.includes('/Users/example'), false);
+    assert.equal(encoded.includes('token=abc'), false);
+    assert.equal(encoded.includes('password=abc'), false);
+});

@@ -1470,6 +1470,7 @@
         if (!audioData || !audioData.domains) return '';
         const mix = audioData.domains['audio-mix'] || {};
         const route = mix.route || (audioData.session && audioData.session.route) || {};
+        const analyser = mix.analyser || (audioData.session && audioData.session.analyser) || {};
         const input = audioData.domains['audio-input'] || {};
         const monitoring = audioData.domains['audio-monitoring'] || {};
         const stems = audioData.domains['stems'] || {};
@@ -1483,6 +1484,10 @@
             ...(Array.isArray(stems.bridges) ? stems.bridges : []),
         ];
         const bridgeHits = bridges.reduce((sum, bridge) => sum + Number(bridge.hitCount || 0), 0);
+        const faders = Array.isArray(mix.faders) ? mix.faders : [];
+        const failedOutcomes = (Array.isArray(audioData.recentOutcomes) ? audioData.recentOutcomes : [])
+            .filter(outcome => outcome && outcome.domain === 'audio-mix' && (outcome.outcome === 'failed' || outcome.status === 'timeout'))
+            .slice(-5);
         const claims = Array.isArray(stems.claims) ? stems.claims : [];
         const owner = stems.owner || null;
         return `<section class="mb-4 rounded-lg border border-gray-800 bg-dark-900/40 p-4" data-audio-session-support>
@@ -1494,6 +1499,7 @@
                 <div class="flex flex-wrap gap-2">
                     ${pill(`route: ${route.routeKind || 'unknown'}`, route.availability === 'available' ? 'clean' : 'warning')}
                     ${pill(`${participants.length} mix participant${participants.length === 1 ? '' : 's'}`, participants.length ? 'info' : 'muted')}
+                    ${pill(`${faders.length} fader${faders.length === 1 ? '' : 's'}`, faders.length ? 'info' : 'muted')}
                     ${pill(`${input.totalSources || sources.length} input source${(input.totalSources || sources.length) === 1 ? '' : 's'}`, sources.length ? 'info' : 'muted')}
                     ${pill(`${monitoring.totalSessions || monitoringSessions.length} monitor${(monitoring.totalSessions || monitoringSessions.length) === 1 ? '' : 's'}`, monitoringSessions.length ? 'info' : 'muted')}
                     ${pill(owner ? `stems: ${owner.ownerId}` : 'stems: no owner', owner ? 'clean' : 'muted')}
@@ -1504,11 +1510,14 @@
             <div class="mt-3 grid gap-2 text-xs text-gray-400 md:grid-cols-2">
                 <div data-audio-session-route>Route: ${text(route.routeKind || 'unknown')} (${text(route.availability || 'unknown')})</div>
                 <div data-audio-session-input>Input: ${sources.map(s => text(s.sourceId || s.kind)).join(', ') || 'none'}</div>
+                <div data-audio-session-analyser>Analyser: ${text(analyser.source || 'unavailable')} (${text(analyser.availability || 'unavailable')})</div>
+                <div data-audio-session-faders>Faders: ${faders.map(fader => `${text(fader.label || fader.faderLabel || fader.participantId)}:${text(fader.availability || 'unknown')}:${text(fader.sourceMode || 'native')}${fader.lastRejectedValue != null ? ':failed' : ''}`).join(', ') || 'none'}</div>
                 <div data-audio-session-monitoring>Monitoring: ${monitoringSessions.map(s => `${text(s.monitoringId)}:${text(s.state)}`).join(', ') || 'none'}</div>
                 <div data-audio-session-stems>Stem owner: ${text(owner && owner.ownerId ? owner.ownerId : 'none')}</div>
                 <div data-audio-session-participants>Participants: ${participants.map(p => text(p.label || p.participantId)).join(', ') || 'none'}</div>
                 <div data-audio-session-claims>Claims: ${claims.map(c => `${text(c.claimId)}:${text(c.state)}`).join(', ') || 'none'}</div>
                 <div data-audio-session-bridges>Bridges: ${bridges.map(b => `${text(b.bridgeId)}:${text(b.outcome || 'handled')}${b.reason ? ` (${text(b.reason)})` : ''}`).join(', ') || 'none'}</div>
+                <div data-audio-session-failures>Failures: ${failedOutcomes.map(outcome => `${text(outcome.operation)}:${text(outcome.faderId || outcome.participantId)}:${text(outcome.status || outcome.outcome)}`).join(', ') || 'none'}</div>
             </div>
         </section>`;
     }

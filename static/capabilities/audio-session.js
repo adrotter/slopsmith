@@ -11,9 +11,15 @@
     const DOMAINS = Object.freeze(['audio-mix', 'audio-input', 'audio-monitoring', 'stems']);
     const MAX_OUTCOMES = 100;
     const MAX_DOMAIN_ITEMS = 50;
+    const FADER_OPERATION_TIMEOUT_MS = 2000;
     const OWNER_ID = 'core.audio.session';
+    const REQUIRED_MIX_KINDS = Object.freeze(['song', 'plugin', 'stem', 'monitoring', 'preview']);
+    const MIX_KINDS = new Set([...REQUIRED_MIX_KINDS, 'analyser', 'other']);
+    const AVAILABILITY = new Set(['available', 'pending', 'unavailable', 'disabled', 'failed', 'incompatible']);
+    const SOURCE_MODES = new Set(['native', 'compatibility', 'core']);
 
     let sequence = 0;
+    const knownMixParticipants = new Map();
     let currentSession = _newSession({});
 
     function _now() { return new Date().toISOString(); }
@@ -33,12 +39,32 @@
         return Number.isFinite(numeric) ? numeric : fallback;
     }
 
+    function _bool(value, fallback = false) {
+        if (value === true || value === false) return value;
+        return fallback;
+    }
+
     function _strings(value) {
         return Array.isArray(value) ? value.map(item => _string(item)).filter(Boolean) : [];
     }
 
     function _plainObject(value) {
         return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    }
+
+    function _availability(value, fallback = 'available') {
+        const normalized = _string(value, fallback);
+        return AVAILABILITY.has(normalized) ? normalized : fallback;
+    }
+
+    function _mixKind(value) {
+        const normalized = _string(value, 'other');
+        return MIX_KINDS.has(normalized) ? normalized : 'other';
+    }
+
+    function _sourceMode(value, fallback = 'native') {
+        const normalized = _string(value, fallback);
+        return SOURCE_MODES.has(normalized) ? normalized : fallback;
     }
 
     function _redactString(value) {
@@ -70,8 +96,9 @@
             playerId: _string(source.playerId, 'main'),
             songKey: _string(source.songKey, ''),
             songFormat: _string(source.songFormat, 'unknown'),
-            state: _string(source.state, 'initializing'),
+            state: _string(source.state, 'idle'),
             routeState: _normalizeRoute(source.routeState || source.route || {}),
+            analyserState: _normalizeAnalyser(source.analyserState || source.analyser || {}),
             mixParticipants: new Map(),
             inputSources: new Map(),
             monitoringSessions: new Map(),
@@ -98,6 +125,18 @@
             selectedByUser: source.selectedByUser === true,
             devicePseudonym: _string(source.devicePseudonym || source.deviceId || source.deviceLabel, ''),
             fallbackReason: _boundedReason(source.fallbackReason || source.reason),
+            lastChangedAt: _string(source.lastChangedAt, _now()),
+        };
+    }
+
+    function _normalizeAnalyser(analyser) {
+        const source = _plainObject(analyser);
+        return {
+            source: _string(source.source, 'unavailable'),
+            availability: _string(source.availability, 'unavailable'),
+            participantId: _string(source.participantId || source.providerId, ''),
+            reason: _boundedReason(source.reason),
+            lastChangedAt: _string(source.lastChangedAt, _now()),
         };
     }
 
@@ -107,31 +146,110 @@
         const min = _number(source.min, 0);
         const max = _number(source.max, 1);
         const step = _number(source.step, 0.01);
+        const defaultValue = _clamp(_number(source.defaultValue, min), min, max > min ? max : min + 1);
+        const currentValue = _number(source.currentValue, _number(source.value, defaultValue));
         return {
-            id: _string(source.id, 'main'),
+            id: _string(source.faderId || source.id, 'main'),
             label: _string(source.label, 'Volume'),
             unit: _string(source.unit, ''),
             min,
             max: max > min ? max : min + 1,
             step: step > 0 ? step : 0.01,
-            defaultValue: _number(source.defaultValue, min),
-            currentValue: _number(source.currentValue, _number(source.value, _number(source.defaultValue, min))),
+            defaultValue,
+            currentValue: _clamp(currentValue, min, max > min ? max : min + 1),
+            lastRequestedValue: _number(source.lastRequestedValue, null),
+            lastRejectedValue: _number(source.lastRejectedValue, null),
+            userAdjustable: source.userAdjustable !== false && source.readOnly !== true,
+            availability: _availability(source.availability, 'available'),
+            lastCommittedAt: _string(source.lastCommittedAt, ''),
         };
+    }
+
+    function _clamp(value, min, max) {
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) return min;
+        return Math.min(max, Math.max(min, numeric));
+    }
+
+    function _normalizeOperationHandlers(source) {
+        const handlers = {};
+        const operationHandlers = _plainObject(source.operationHandlers || source.handlers || source.providerOperations);
+        for (const [key, value] of Object.entries(operationHandlers)) {
+            if (typeof value === 'function') handlers[key] = value;
+        }
+        if (typeof source.getValue === 'function') handlers['fader.get-value'] = source.getValue;
+        if (typeof source.setValue === 'function') handlers['fader.set-value'] = source.setValue;
+        const fader = _plainObject(source.fader);
+        if (typeof fader.getValue === 'function') handlers['fader.get-value'] = fader.getValue;
+        if (typeof fader.setValue === 'function') handlers['fader.set-value'] = fader.setValue;
+        return handlers;
+    }
+
+    function _logicalFaderKey(participant, source) {
+        const explicit = source.logicalFaderKey || source.logicalKey || (source.fader && source.fader.logicalFaderKey);
+        if (explicit) return _string(explicit);
+        const faderId = participant.fader ? participant.fader.id : 'main';
+        const owner = participant.ownerPluginId || participant.participantId;
+        return `${owner}:${faderId}`;
     }
 
     function _normalizeParticipant(spec) {
         const source = _plainObject(spec);
         const participantId = _string(source.participantId || source.id);
         if (!participantId) return null;
+        const compatibilitySource = _string(source.compatibilitySource || source.legacySurface, '');
+        const sourceMode = _sourceMode(source.sourceMode, source.ownerPluginId === 'core' || source.pluginId === 'core' || source.source === 'core' ? 'core' : (compatibilitySource ? 'compatibility' : 'native'));
         return {
             participantId,
             ownerPluginId: _string(source.ownerPluginId || source.pluginId || source.source, 'core'),
             label: _string(source.label || source.name, participantId),
-            kind: _string(source.kind, 'other'),
+            kind: _mixKind(source.kind),
             fader: _normalizeFader(source.fader),
             operations: _strings(source.operations || source.providerOperations),
-            availability: _string(source.availability, source.disabled ? 'disabled' : 'available'),
-            compatibilitySource: _string(source.compatibilitySource || source.legacySurface, ''),
+            operationHandlers: _normalizeOperationHandlers(source),
+            availability: _availability(source.availability, source.disabled ? 'disabled' : (currentSession.state === 'active' ? 'available' : 'pending')),
+            sourceMode,
+            compatibilitySource,
+            supersededBy: _string(source.supersededBy, ''),
+            registeredAt: _string(source.registeredAt, _now()),
+            lastSeenAt: _now(),
+        };
+    }
+
+    function _summaryParticipant(participant) {
+        const clone = _clone(participant);
+        if (clone) delete clone.operationHandlers;
+        return clone;
+    }
+
+    function _summaryFader(participant, options = {}) {
+        if (!participant || !participant.fader) return null;
+        const fader = participant.fader;
+        const availability = options.availability || _effectiveFaderAvailability(participant);
+        return {
+            participantId: participant.participantId,
+            ownerPluginId: participant.ownerPluginId,
+            label: participant.label,
+            kind: participant.kind,
+            sourceMode: participant.sourceMode,
+            compatibilitySource: participant.compatibilitySource,
+            supersededBy: participant.supersededBy || '',
+            logicalFaderKey: participant.logicalFaderKey,
+            faderId: fader.id,
+            id: fader.id,
+            faderKey: _faderKey(participant.participantId, fader.id),
+            faderLabel: fader.label,
+            unit: fader.unit,
+            min: fader.min,
+            max: fader.max,
+            step: fader.step,
+            defaultValue: fader.defaultValue,
+            currentValue: fader.currentValue,
+            lastRequestedValue: fader.lastRequestedValue,
+            lastRejectedValue: fader.lastRejectedValue,
+            userAdjustable: fader.userAdjustable && availability === 'available',
+            availability,
+            lastCommittedAt: fader.lastCommittedAt,
         };
     }
 
@@ -157,6 +275,7 @@
             domain: DOMAINS.includes(source.domain) ? source.domain : 'audio-mix',
             operation: _string(source.operation || source.command || source.event, 'inspect'),
             participantId: _string(source.participantId || source.ownerId || source.requester, ''),
+            faderId: _string(source.faderId, ''),
             bridgeId: _string(source.bridgeId, ''),
             outcome,
             status: _string(source.status, ''),
@@ -176,8 +295,199 @@
     function _noOwner(reason, payload) { return { outcome: 'no-owner', reason, payload }; }
     function _incompatible(reason, payload) { return { outcome: 'incompatible-version', reason, payload }; }
 
+    function _denied(reason, payload) { return { outcome: 'denied', reason, payload }; }
+
+    function _faderKey(participantId, faderId) {
+        return `${_string(participantId)}:${_string(faderId, 'main')}`;
+    }
+
+    function _findParticipant(participantId, faderId) {
+        const id = _string(participantId);
+        if (id && currentSession.mixParticipants.has(id)) return currentSession.mixParticipants.get(id);
+        const requestedFaderId = _string(faderId);
+        for (const participant of currentSession.mixParticipants.values()) {
+            if (participant.fader && participant.fader.id === requestedFaderId) return participant;
+        }
+        return null;
+    }
+
+    function _effectiveFaderAvailability(participant) {
+        if (!participant || !participant.fader) return 'unavailable';
+        if (participant.supersededBy) return 'disabled';
+        if (participant.availability !== 'available') return participant.availability;
+        if (participant.fader.availability !== 'available') return participant.fader.availability;
+        if (!participant.fader.userAdjustable) return 'disabled';
+        if (currentSession.state !== 'active' && participant.kind !== 'song') return 'pending';
+        return 'available';
+    }
+
+    function _operationPriority(participant) {
+        if (participant.sourceMode === 'core') return 0;
+        if (participant.sourceMode === 'native') return 1;
+        return 2;
+    }
+
+    function _refreshDuplicateSuppression() {
+        const groups = new Map();
+        for (const participant of currentSession.mixParticipants.values()) {
+            participant.supersededBy = '';
+            if (!participant.fader) continue;
+            const list = groups.get(participant.logicalFaderKey) || [];
+            list.push(participant);
+            groups.set(participant.logicalFaderKey, list);
+        }
+        for (const list of groups.values()) {
+            if (list.length < 2) continue;
+            list.sort((a, b) => _operationPriority(a) - _operationPriority(b) || a.participantId.localeCompare(b.participantId));
+            const winner = list[0];
+            for (const loser of list.slice(1)) {
+                loser.supersededBy = winner.participantId;
+            }
+        }
+    }
+
+    function _recordDuplicateSuppression() {
+        for (const participant of currentSession.mixParticipants.values()) {
+            if (!participant.supersededBy || participant.sourceMode !== 'compatibility') continue;
+            recordBridgeHit({
+                domain: 'audio-mix',
+                bridgeId: participant.compatibilitySource || 'audio-mix.fader-registry',
+                legacySurface: participant.compatibilitySource || 'registerFader',
+                participantId: participant.participantId,
+                outcome: 'overridden',
+                status: 'overshadowed',
+                reason: `Native audio-mix participant ${participant.supersededBy} owns logical fader ${participant.logicalFaderKey}`,
+            });
+        }
+    }
+
+    function _visibleFaderParticipants() {
+        _refreshDuplicateSuppression();
+        return Array.from(currentSession.mixParticipants.values())
+            .filter(participant => participant.fader && !participant.supersededBy)
+            .sort((a, b) => REQUIRED_MIX_KINDS.indexOf(a.kind) - REQUIRED_MIX_KINDS.indexOf(b.kind) || a.label.localeCompare(b.label) || a.participantId.localeCompare(b.participantId));
+    }
+
+    function _withFaderTimeout(promise, participant, operation) {
+        let timer = null;
+        const timeout = new Promise((_, reject) => {
+            timer = setTimeout(() => {
+                const err = new Error(`${operation} timed out after ${FADER_OPERATION_TIMEOUT_MS}ms`);
+                err.timedOut = true;
+                reject(err);
+            }, FADER_OPERATION_TIMEOUT_MS);
+        });
+        return Promise.race([Promise.resolve(promise), timeout]).finally(() => { if (timer !== null) clearTimeout(timer); });
+    }
+
+    function _extractCommittedValue(result, fallback) {
+        if (Number.isFinite(Number(result))) return Number(result);
+        const source = _plainObject(result);
+        const value = _number(source.committedValue, _number(source.currentValue, _number(source.value, fallback)));
+        return Number.isFinite(value) ? value : fallback;
+    }
+
+    function _emitFaderUnavailable(participant, reason) {
+        const payload = _summaryFader(participant, { availability: _effectiveFaderAvailability(participant) });
+        if (payload) payload.reason = _boundedReason(reason);
+        capabilities.emitEvent('audio-mix', 'fader-unavailable', payload || { participantId: participant && participant.participantId, reason: _boundedReason(reason) });
+    }
+
+    async function listFaders() {
+        const faders = _visibleFaderParticipants().map(participant => _summaryFader(participant));
+        const kinds = Object.fromEntries(REQUIRED_MIX_KINDS.map(kind => [kind, faders.some(fader => fader.kind === kind)]));
+        _recordOutcome({ domain: 'audio-mix', operation: 'list-faders', participantId: OWNER_ID, outcome: 'handled', status: `${faders.length}` });
+        return _handled({ faders, requiredKinds: kinds, timeoutMs: FADER_OPERATION_TIMEOUT_MS });
+    }
+
+    async function getFaderValue(payload = {}) {
+        const participant = _findParticipant(payload.participantId, payload.faderId || payload.id);
+        if (!participant || !participant.fader) {
+            const result = _noHandler('Unknown audio-mix fader', { participantId: payload.participantId || '', faderId: payload.faderId || payload.id || '' });
+            _recordOutcome({ domain: 'audio-mix', operation: 'get-fader-value', participantId: result.payload.participantId, faderId: result.payload.faderId, outcome: result.outcome, reason: result.reason });
+            return result;
+        }
+        const availability = _effectiveFaderAvailability(participant);
+        if (availability !== 'available') {
+            const result = _degraded(`Fader is ${availability}`, _summaryFader(participant, { availability }));
+            _emitFaderUnavailable(participant, result.reason);
+            _recordOutcome({ domain: 'audio-mix', operation: 'get-fader-value', participantId: participant.participantId, faderId: participant.fader.id, outcome: result.outcome, status: availability, reason: result.reason });
+            return result;
+        }
+        const previous = participant.fader.currentValue;
+        try {
+            const handler = participant.operationHandlers['fader.get-value'];
+            const raw = handler ? await _withFaderTimeout(handler({ participant: _summaryParticipant(participant), fader: _summaryFader(participant) }), participant, 'fader.get-value') : previous;
+            const committed = _clamp(_extractCommittedValue(raw, previous), participant.fader.min, participant.fader.max);
+            participant.fader.currentValue = committed;
+            participant.fader.lastCommittedAt = _now();
+            _recordOutcome({ domain: 'audio-mix', operation: 'get-fader-value', participantId: participant.participantId, faderId: participant.fader.id, outcome: 'handled', status: 'available' });
+            _touch();
+            return _handled({ ..._summaryFader(participant), committedValue: committed, previousCommittedValue: previous });
+        } catch (err) {
+            const timedOut = !!(err && err.timedOut);
+            const reason = timedOut ? 'Fader get-value timed out' : _boundedReason(err && err.message ? err.message : String(err));
+            _recordOutcome({ domain: 'audio-mix', operation: 'get-fader-value', participantId: participant.participantId, faderId: participant.fader.id, outcome: 'failed', status: timedOut ? 'timeout' : 'failed', reason });
+            _touch();
+            return _failed(reason, { ..._summaryFader(participant), committedValue: previous, timedOut });
+        }
+    }
+
+    async function setFaderValue(payload = {}) {
+        const participant = _findParticipant(payload.participantId, payload.faderId || payload.id);
+        const requestedValue = _number(payload.value ?? payload.requestedValue, null);
+        if (!participant || !participant.fader) {
+            const result = _noHandler('Unknown audio-mix fader', { participantId: payload.participantId || '', faderId: payload.faderId || payload.id || '', requestedValue });
+            _recordOutcome({ domain: 'audio-mix', operation: 'set-fader-value', participantId: result.payload.participantId, faderId: result.payload.faderId, outcome: result.outcome, reason: result.reason });
+            return result;
+        }
+        if (!Number.isFinite(requestedValue)) {
+            const result = _denied('Fader value must be a finite number', { ..._summaryFader(participant), requestedValue });
+            _recordOutcome({ domain: 'audio-mix', operation: 'set-fader-value', participantId: participant.participantId, faderId: participant.fader.id, outcome: result.outcome, status: 'invalid-value', reason: result.reason });
+            return result;
+        }
+        const availability = _effectiveFaderAvailability(participant);
+        if (availability !== 'available') {
+            const result = _degraded(`Fader is ${availability}`, { ..._summaryFader(participant, { availability }), requestedValue });
+            _emitFaderUnavailable(participant, result.reason);
+            _recordOutcome({ domain: 'audio-mix', operation: 'set-fader-value', participantId: participant.participantId, faderId: participant.fader.id, outcome: result.outcome, status: availability, reason: result.reason });
+            return result;
+        }
+        const previous = participant.fader.currentValue;
+        const normalizedValue = _clamp(requestedValue, participant.fader.min, participant.fader.max);
+        participant.fader.lastRequestedValue = requestedValue;
+        try {
+            const handler = participant.operationHandlers['fader.set-value'];
+            const raw = handler ? await _withFaderTimeout(handler(normalizedValue, { requestedValue, participant: _summaryParticipant(participant), fader: _summaryFader(participant) }), participant, 'fader.set-value') : normalizedValue;
+            const committed = _clamp(_extractCommittedValue(raw, normalizedValue), participant.fader.min, participant.fader.max);
+            participant.fader.currentValue = committed;
+            participant.fader.lastRejectedValue = null;
+            participant.fader.lastCommittedAt = _now();
+            const result = { ..._summaryFader(participant), requestedValue, normalizedValue, committedValue: committed, previousCommittedValue: previous };
+            _recordOutcome({ domain: 'audio-mix', operation: 'set-fader-value', participantId: participant.participantId, faderId: participant.fader.id, outcome: 'handled', status: committed === normalizedValue ? 'committed' : 'normalized' });
+            capabilities.emitEvent('audio-mix', 'fader-value-changed', result);
+            _touch();
+            return _handled(result);
+        } catch (err) {
+            const timedOut = !!(err && err.timedOut);
+            const reason = timedOut ? 'Fader set-value timed out' : _boundedReason(err && err.message ? err.message : String(err));
+            participant.fader.lastRejectedValue = requestedValue;
+            participant.fader.currentValue = previous;
+            _recordOutcome({ domain: 'audio-mix', operation: 'set-fader-value', participantId: participant.participantId, faderId: participant.fader.id, outcome: 'failed', status: timedOut ? 'timeout' : 'failed', reason });
+            _touch();
+            return _failed(reason, { ..._summaryFader(participant), requestedValue, normalizedValue, committedValue: previous, previousCommittedValue: previous, timedOut });
+        }
+    }
+
     function startSession(options = {}) {
         currentSession = _newSession({ ...options, state: 'active' });
+        for (const participant of knownMixParticipants.values()) {
+            const attached = { ...participant, lastSeenAt: _now() };
+            if (attached.availability === 'pending') attached.availability = 'available';
+            if (attached.fader && attached.fader.availability === 'pending') attached.fader.availability = 'available';
+            currentSession.mixParticipants.set(attached.participantId, attached);
+        }
+        _refreshDuplicateSuppression();
         _recordOutcome({ domain: 'audio-mix', operation: 'session.start', participantId: OWNER_ID, outcome: 'handled' });
         _touch();
         return snapshot();
@@ -185,6 +495,7 @@
 
     function stopSession(reason = 'Session stopped') {
         currentSession.state = 'stopped';
+        currentSession.routeState = _normalizeRoute({ routeKind: 'unknown', availability: 'unavailable', reason });
         _recordOutcome({ domain: 'audio-mix', operation: 'session.stop', participantId: OWNER_ID, outcome: 'handled', reason });
         _touch();
         return snapshot();
@@ -212,6 +523,15 @@
         return returnedRoute;
     }
 
+    function setAnalyser(analyser) {
+        currentSession.analyserState = _normalizeAnalyser(analyser);
+        const degraded = currentSession.analyserState.availability !== 'available';
+        _recordOutcome({ domain: 'audio-mix', operation: 'analyser.set', participantId: currentSession.analyserState.participantId || OWNER_ID, outcome: degraded ? 'degraded' : 'handled', status: currentSession.analyserState.availability, reason: currentSession.analyserState.reason });
+        capabilities.emitEvent('audio-mix', degraded ? 'analyser-unavailable' : 'analyser-changed', currentSession.analyserState);
+        _touch();
+        return _clone(currentSession.analyserState);
+    }
+
     function registerMixParticipant(spec) {
         const source = _plainObject(spec);
         if (source.incompatible || (source.version && Number(source.version) !== 1)) {
@@ -225,17 +545,24 @@
             _recordOutcome({ domain: 'audio-mix', operation: 'register-participant', outcome: result.outcome, reason: result.reason });
             return result;
         }
+        participant.logicalFaderKey = _logicalFaderKey(participant, source);
+        if (participant.fader && participant.fader.availability === 'available' && participant.availability !== 'available') {
+            participant.fader.availability = participant.availability;
+        }
+        knownMixParticipants.set(participant.participantId, participant);
         currentSession.mixParticipants.set(participant.participantId, participant);
+        _refreshDuplicateSuppression();
+        _recordDuplicateSuppression();
         _recordOutcome({ domain: 'audio-mix', operation: 'register-participant', participantId: participant.participantId, outcome: 'handled', status: participant.availability });
-        // Emit a clone so a subscriber can't mutate the stored session state.
-        capabilities.emitEvent('audio-mix', 'participant-registered', _clone(participant));
+        capabilities.emitEvent('audio-mix', 'participant-registered', _summaryParticipant(participant));
         _touch();
-        return _handled(_clone(participant));
+        return _handled(_summaryParticipant(participant));
     }
 
     function unregisterMixParticipant(participantId) {
         const id = _string(participantId);
         const removed = currentSession.mixParticipants.delete(id);
+        knownMixParticipants.delete(id);
         const outcome = removed ? 'handled' : 'no-handler';
         _recordOutcome({ domain: 'audio-mix', operation: 'unregister-participant', participantId: id, outcome });
         if (removed) capabilities.emitEvent('audio-mix', 'participant-removed', { participantId: id });
@@ -595,13 +922,18 @@
                 songFormat: currentSession.songFormat,
                 state: currentSession.state,
                 route: _redactedRoute(currentSession.routeState, pseudonymize),
+                analyser: _clone(currentSession.analyserState),
                 createdAt: currentSession.createdAt,
                 updatedAt: currentSession.updatedAt,
             },
             domains: {
                 'audio-mix': {
-                    participants: Array.from(currentSession.mixParticipants.values()).map(_clone),
+                    state: currentSession.state,
+                    participants: Array.from(currentSession.mixParticipants.values()).map(_summaryParticipant),
+                    faders: _visibleFaderParticipants().map(participant => _summaryFader(participant)),
+                    requiredKinds: Object.fromEntries(REQUIRED_MIX_KINDS.map(kind => [kind, Array.from(currentSession.mixParticipants.values()).some(participant => participant.kind === kind)])),
                     route: _redactedRoute(currentSession.routeState, pseudonymize),
+                    analyser: _clone(currentSession.analyserState),
                     bridges: _domainBridges('audio-mix'),
                 },
                 'audio-input': {
@@ -636,6 +968,11 @@
     function _audioMixCommand(commandName, ctx = {}) {
         const payload = _target(ctx);
         if (commandName === 'inspect') return _handled(snapshot().domains['audio-mix']);
+        if (commandName === 'list-faders') return listFaders();
+        if (commandName === 'get-fader-value') return getFaderValue(payload);
+        if (commandName === 'set-fader-value') return setFaderValue(payload);
+        if (commandName === 'inspect-route') return _handled(_clone(snapshot().domains['audio-mix'].route));
+        if (commandName === 'inspect-analyser') return _handled(_clone(snapshot().domains['audio-mix'].analyser));
         if (commandName === 'register-participant') return registerMixParticipant(payload);
         if (commandName === 'unregister-participant') return unregisterMixParticipant(payload.participantId || payload.id);
         return _degraded(`Unsupported audio-mix command: ${commandName}`);
@@ -673,13 +1010,18 @@
         capabilities.registerOwner('audio-mix', {
             pluginId: OWNER_ID,
             kind: 'provider-coordinator',
-            commands: ['inspect', 'register-participant', 'unregister-participant'],
+            commands: ['inspect', 'list-faders', 'get-fader-value', 'set-fader-value', 'inspect-route', 'inspect-analyser', 'register-participant', 'unregister-participant'],
             operations: ['fader.get-value', 'fader.set-value', 'analyser.get-summary', 'route.get-current'],
-            events: ['participant-registered', 'participant-removed', 'fader-changed', 'route-changed', 'route-degraded', 'bridge-hit'],
+            events: ['participant-registered', 'participant-removed', 'fader-value-changed', 'fader-unavailable', 'route-changed', 'route-degraded', 'analyser-changed', 'analyser-unavailable', 'bridge-hit'],
             safety: 'safe',
             description: 'Coordinates the active player audio mix, route, fader participants, analyser inspection, and audio compatibility bridge usage.',
             handlers: {
                 inspect: ctx => _audioMixCommand('inspect', ctx),
+                'list-faders': ctx => _audioMixCommand('list-faders', ctx),
+                'get-fader-value': ctx => _audioMixCommand('get-fader-value', ctx),
+                'set-fader-value': ctx => _audioMixCommand('set-fader-value', ctx),
+                'inspect-route': ctx => _audioMixCommand('inspect-route', ctx),
+                'inspect-analyser': ctx => _audioMixCommand('inspect-analyser', ctx),
                 'register-participant': ctx => _audioMixCommand('register-participant', ctx),
                 'unregister-participant': ctx => _audioMixCommand('unregister-participant', ctx),
             },
@@ -762,8 +1104,12 @@
         startSession,
         stopSession,
         setRoute,
+        setAnalyser,
         registerMixParticipant,
         unregisterMixParticipant,
+        listFaders,
+        getFaderValue,
+        setFaderValue,
         registerInputSource,
         unregisterInputSource,
         selectInputSource,

@@ -135,16 +135,19 @@ Existing plugins can keep using `window.slopsmith.audio.registerFader(spec)` whi
     "audio-mix": {
       "roles": ["provider"],
       "operations": ["fader.get-value", "fader.set-value"],
-      "events": ["fader-changed"],
+      "events": ["fader-value-changed", "fader-unavailable"],
       "mode": "active",
-      "compatibility": "shim-allowed",
-      "ownership": "multi-provider",
+      "compatibility": "none",
       "safety": "safe",
       "version": 1
     }
   }
 }
 ```
+
+Native audio-mix fader providers should register a stable participant id and fader id, return the committed value from every set operation, and settle get/set operations within two seconds. The player mixer displays the committed value rather than the raw requested value. If the fader is temporarily unavailable, keep the participant registered with unavailable/disabled state so the mixer can render a disabled control and diagnostics can explain why it cannot be changed.
+
+During migration, a plugin may still call `window.slopsmith.audio.registerFader(spec)`. Core maps that legacy fader into a compatibility-backed audio-mix participant and records bridge hits. If a native participant and a legacy fader represent the same logical source, the native participant owns the visible control and the legacy path is reported as compatibility-backed/overshadowed.
 
 ## Audio Input And Monitoring Requester
 

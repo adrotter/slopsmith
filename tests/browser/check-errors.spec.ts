@@ -32,3 +32,22 @@ test('check for console errors', async ({ page }) => {
   console.log('Unexpected errors:', unexpected);
   expect(unexpected).toEqual([]);
 });
+
+test('audio mixer opens with audio-mix command-backed controls', async ({ page }) => {
+  await page.goto('/');
+  await page.waitForSelector('#btn-mixer', { state: 'attached', timeout: 10000 });
+
+  await page.evaluate(() => window.slopsmith?.audio?.openMixer?.());
+  await expect(page.locator('#mixer-popover')).not.toHaveClass(/hidden/);
+
+  const faderState = await page.evaluate(async () => {
+    const api = window.slopsmith?.capabilities;
+    if (!api?.command) return { outcome: 'no-owner' };
+    const result = await api.command('audio-mix', 'list-faders', { requester: 'browser-smoke' });
+    return { outcome: result.outcome, count: result.payload?.faders?.length || 0 };
+  });
+
+  expect(faderState.outcome).toBe('handled');
+  expect(faderState.count).toBeGreaterThan(0);
+  await expect(page.locator('#mixer-popover .mixer-strip').first()).toBeAttached();
+});

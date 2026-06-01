@@ -68,3 +68,36 @@ test('barrier and input compatibility surfaces are visible in diagnostics', () =
     assert.equal(snapshot.domains['audio-monitoring'].bridges.some(bridge => bridge.bridgeId === 'audio-monitoring.audio-barrier' && bridge.outcome === 'degraded'), true);
     assert.equal(snapshot.domains['audio-input'].bridges.some(bridge => bridge.bridgeId === 'audio-input.legacy-source' && bridge.outcome === 'denied'), true);
 });
+
+test('legacy registerFader callbacks are usable through audio-mix get and set operations', async () => {
+    const window = loadAudioSession();
+    installMixerDom(window);
+    runBrowserScript(window, 'static/audio-mixer.js');
+    window.slopsmith.audioSession.startSession({ sessionId: 'main:test-song' });
+
+    let gain = 0.35;
+    window.slopsmith.audio.registerFader({
+        id: 'plugin.gain',
+        label: 'Plugin Gain',
+        min: 0,
+        max: 1,
+        step: 0.05,
+        defaultValue: 0.35,
+        getValue: () => gain,
+        setValue: value => { gain = Math.min(0.9, value); return gain; },
+    });
+
+    const api = window.slopsmith.capabilities;
+    const listed = await api.dispatch({ capability: 'audio-mix', command: 'list-faders', source: 'test' });
+    const read = await api.dispatch({ capability: 'audio-mix', command: 'get-fader-value', source: 'test', payload: { participantId: 'fader.plugin.gain', faderId: 'plugin.gain' } });
+    const written = await api.dispatch({ capability: 'audio-mix', command: 'set-fader-value', source: 'test', payload: { participantId: 'fader.plugin.gain', faderId: 'plugin.gain', value: 1 } });
+
+    assert.equal(listed.payload.faders.some(fader => fader.participantId === 'fader.plugin.gain' && fader.sourceMode === 'compatibility'), true);
+    assert.equal(read.payload.committedValue, 0.35);
+    assert.equal(written.payload.committedValue, 0.9);
+    assert.equal(gain, 0.9);
+
+    window.slopsmith.audio.unregisterFader('plugin.gain');
+    assert.equal(window.slopsmith.audio.getFaders().some(fader => fader.id === 'plugin.gain'), false);
+    assert.equal(window.slopsmith.audioSession.snapshot().domains['audio-mix'].participants.some(participant => participant.participantId === 'fader.plugin.gain'), false);
+});

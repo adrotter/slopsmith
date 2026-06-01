@@ -547,3 +547,48 @@ test('selected domain participant count includes shim-only graph participants', 
     assert.match(selectedContent, /data-domain-participant-card="window\.slopsmith\.libraryProviders\.refresh"/);
     assert.match(selectedContent, /data-domain-participant-card="remote_library_client"/);
 });
+
+test('capability inspector renders audio-mix fader diagnostics from audio-session snapshot', () => {
+    const snapshot = {
+        pipelines: [
+            { name: 'audio-mix', review: { lifecycle: 'active', label: 'Active contract', tone: 'clean', summary: 'Audio mix surface.' }, participants: [
+                { pluginId: 'core.audio.session', roles: ['owner'], commands: ['list-faders', 'set-fader-value'], operations: ['fader.get-value', 'fader.set-value'], events: ['fader-value-changed', 'fader-unavailable'], runtime: true, availability: 'available', ownership: 'multi-provider', safety: 'safe' },
+            ], conflicts: [] },
+        ],
+        participants: [{ pluginId: 'core.audio.session' }],
+        compatibilityShims: [],
+        expectedCompatibilityShims: [],
+    };
+    const { window, elements } = loadInspector(snapshot);
+    window.slopsmith.audioSession = {
+        snapshot: () => ({
+            schema: 'slopsmith.audio_session.diagnostics.v1',
+            session: { route: { routeKind: 'desktop', availability: 'degraded' }, analyser: { source: 'plugin', availability: 'available' } },
+            domains: {
+                'audio-mix': {
+                    participants: [{ participantId: 'plugin.delay', label: 'Delay', sourceMode: 'native' }],
+                    faders: [
+                        { participantId: 'plugin.delay', label: 'Delay Wet', faderId: 'wet', availability: 'available', sourceMode: 'native' },
+                        { participantId: 'fader.legacy', label: 'Legacy Gain', faderId: 'gain', availability: 'disabled', sourceMode: 'compatibility', lastRejectedValue: 0.8 },
+                    ],
+                    route: { routeKind: 'desktop', availability: 'degraded' },
+                    analyser: { source: 'plugin', availability: 'available' },
+                    bridges: [{ bridgeId: 'audio-mix.fader-registry', outcome: 'overridden', reason: 'overshadowed', hitCount: 1 }],
+                },
+                'audio-input': { sources: [], totalSources: 0 },
+                'audio-monitoring': { sessions: [], totalSessions: 0 },
+                stems: { owner: null, claims: [], bridges: [] },
+            },
+            recentOutcomes: [{ domain: 'audio-mix', operation: 'set-fader-value', participantId: 'fader.legacy', faderId: 'gain', outcome: 'failed', status: 'timeout' }],
+        }),
+    };
+
+    window.__slopsmithCapabilityInspector.render();
+    const content = elements.get('capability-inspector-content').innerHTML;
+
+    assert.match(content, /data-audio-session-support/);
+    assert.match(content, /Faders: Delay Wet:available:native, Legacy Gain:disabled:compatibility:failed/);
+    assert.match(content, /Analyser: plugin \(available\)/);
+    assert.match(content, /audio-mix\.fader-registry:overridden \(overshadowed\)/);
+    assert.match(content, /Failures: set-fader-value:gain:timeout/);
+});

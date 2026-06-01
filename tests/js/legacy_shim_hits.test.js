@@ -25,6 +25,45 @@ test('legacy bridge hit counts are attributed to canonical audio domains', () =>
     assert.equal(shims.find(shim => shim.shimId === 'audio-monitoring.audio-barrier').hitCount, 1);
 });
 
+test('native audio-mix participant suppresses matching legacy fader and records overshadowed bridge hit', async () => {
+    const { runBrowserScript, installMixerDom } = require('./audio_session_test_harness');
+    const window = loadAudioSession();
+    installMixerDom(window);
+    runBrowserScript(window, 'static/audio-mixer.js');
+    window.slopsmith.audioSession.startSession({ sessionId: 'main:test-song' });
+
+    window.slopsmith.audio.registerFader({
+        id: 'delay.wet',
+        label: 'Delay Wet Legacy',
+        min: 0,
+        max: 1,
+        step: 0.1,
+        defaultValue: 0.2,
+        logicalFaderKey: 'delay:wet',
+        getValue: () => 0.2,
+        setValue: () => {},
+    });
+    window.slopsmith.audioSession.registerMixParticipant({
+        participantId: 'plugin.delay.native',
+        ownerPluginId: 'delay',
+        label: 'Delay Wet',
+        kind: 'plugin',
+        sourceMode: 'native',
+        logicalFaderKey: 'delay:wet',
+        fader: { id: 'wet', label: 'Delay Wet', min: 0, max: 1, step: 0.1, defaultValue: 0.4, currentValue: 0.4 },
+        operations: ['fader.get-value', 'fader.set-value'],
+    });
+
+    const listed = await window.slopsmith.capabilities.dispatch({ capability: 'audio-mix', command: 'list-faders', source: 'test' });
+    const snapshot = window.slopsmith.audioSession.snapshot();
+    const legacy = snapshot.domains['audio-mix'].participants.find(participant => participant.participantId === 'fader.delay.wet');
+
+    assert.equal(listed.payload.faders.some(fader => fader.participantId === 'plugin.delay.native'), true);
+    assert.equal(listed.payload.faders.some(fader => fader.participantId === 'fader.delay.wet'), false);
+    assert.equal(legacy.supersededBy, 'plugin.delay.native');
+    assert.equal(snapshot.domains['audio-mix'].bridges.some(bridge => bridge.status === 'overshadowed' && bridge.participantId === 'fader.delay.wet'), true);
+});
+
 // Source-level guards for PR1 runtime compatibility-shim hit accounting.
 // Broader app/player/audio domains are reserved for follow-up PRs, so this
 // file checks plugin attribution helpers and that library now uses the native

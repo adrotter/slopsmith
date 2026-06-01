@@ -98,6 +98,28 @@ RUN apk add --no-cache curl xz \
     && cp /tmp/ffmpeg-extract/LICENSE.txt /out/LICENSE.txt \
     && rm -rf /tmp/ffmpeg-extract /tmp/ffmpeg.tar.xz
 
+# ── Stage 1d: Build the Tailwind stylesheet over the FULL plugin set ──────
+# The committed static/tailwind.min.css is generated against only the in-tree
+# plugins. Rather than ship it as-is (leaving baked-in plugins' classes
+# unstyled now that the Play CDN's runtime JIT is gone — slopsmith#411),
+# rebuild it here, after static/ + plugins/ are present, so the sheet covers
+# whatever plugins are baked into the image. Runs in a throwaway node stage so
+# this build-time toolchain never lands in the final image; the runtime node
+# added later in the final stage (for on-install regeneration) is a separate,
+# deliberate inclusion. Reuses the repo's tailwind.config.js (theme, safelist,
+# highway_3d exclusion) for parity with scripts/build-tailwind.sh.
+# (Runtime-installed plugins are handled separately by the server's rebuild.)
+FROM node:20-slim AS tailwind-builder
+WORKDIR /build
+COPY tailwind.config.js ./
+COPY static/ ./static/
+COPY plugins/ ./plugins/
+RUN npx -y tailwindcss@3.4.19 \
+        -c tailwind.config.js \
+        -i static/_tailwind.src.css \
+        -o static/tailwind.min.css \
+        --minify
+
 # ── Stage 2: Final image ────────────────────────────────────────────────
 FROM python:3.12-slim
 # Re-declare the ffmpeg ARGs so their values are available to LABEL below.
@@ -141,8 +163,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libvorbisfile3 \
     libspeex1 \
     libopus0 \
+    # Shared libs the copied-in `node` binary links against. Normally present
+    # transitively, but install explicitly so the runtime regeneration path
+    # can't break with a dynamic-linker error if a future base/dep change stops
+    # pulling them in.
+    libstdc++6 \
+    libgcc-s1 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+
+# Node + the pinned Tailwind CLI for RUNTIME stylesheet regeneration. When a
+# plugin is installed into SLOPSMITH_PLUGINS_DIR at runtime (or discovered
+# there on startup), the server rebuilds static/tailwind.min.css so the
+# plugin's classes are styled — the image-baked sheet only covered in-tree
+# plugins (see lib/tailwind_rebuild.py). tailwindcss is installed globally so
+# the rebuild runs offline, with no npx fetch at install time. node/npm are
+# copied from the existing tailwind-builder stage (same node:20-slim base) to
+# avoid pulling that image a second time.
+COPY --from=tailwind-builder /usr/local/bin/node /usr/local/bin/node
+COPY --from=tailwind-builder /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -sf /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && npm install -g tailwindcss@3.4.19 \
+    && npm cache clean --force
 
 # Static ffmpeg + ffprobe binaries from the throwaway fetcher stage above.
 # BtbN GPL builds statically link their codec deps and don't pull in
@@ -190,6 +233,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY lib/ /app/lib/
 COPY static/ /app/static/
 COPY plugins/ /app/plugins/
+# Replace the committed sheet with the bundled-plugin-aware build from stage 1d.
+COPY --from=tailwind-builder /build/static/tailwind.min.css /app/static/tailwind.min.css
+# tailwind.config.js + _tailwind.src.css let the server regenerate the sheet
+# when a plugin is installed at runtime (see update_manager on-install hook).
+COPY tailwind.config.js /app/tailwind.config.js
 COPY server.py /app/
 COPY main.py /app/
 COPY VERSION /app/

@@ -2071,6 +2071,26 @@ async def startup_events():
             )
             load_plugins(app, plugin_context, progress_cb=_on_progress,
                          route_setup_fn=_route_setup_on_main)
+            # Self-heal a freshly recreated container: its filesystem reset to
+            # the image-baked sheet (in-tree plugins only), but a mounted
+            # SLOPSMITH_PLUGINS_DIR may carry user-installed plugins whose
+            # classes aren't in it. Run in its OWN daemon thread so the startup
+            # status can flip to "complete" immediately rather than waiting on
+            # the (up to 120s) Tailwind subprocess. No-op when there are no user
+            # plugins or no Tailwind engine (e.g. desktop/native).
+            def _startup_tailwind_rebuild():
+                try:
+                    import tailwind_rebuild
+                    if tailwind_rebuild.user_plugin_count() > 0:
+                        tailwind_rebuild.rebuild("startup-scan")
+                except Exception:
+                    log.warning("startup tailwind rebuild failed", exc_info=True)
+
+            # Skip entirely in sync-startup mode (used by tests): no background
+            # thread AND no slow inline subprocess. The startup self-heal only
+            # matters for a real async startup of a recreated container.
+            if not _sync_mode:
+                threading.Thread(target=_startup_tailwind_rebuild, daemon=True).start()
             status = _get_startup_status()
             _set_startup_status(
                 running=False,

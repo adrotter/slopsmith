@@ -275,9 +275,8 @@ def test_split_during_conversion_uses_decoded_wav_without_packing_it(
         out_wav.parent.mkdir(parents=True, exist_ok=True)
         out_wav.write_bytes(b"RIFF" + b"\x00" * 256)
 
-    def _stub_encode_ogg(_wav_path: Path, out_ogg: Path) -> None:
-        out_ogg.parent.mkdir(parents=True, exist_ok=True)
-        out_ogg.write_bytes(b"OggS" + b"\x00" * 256)
+    def _stub_encode_ogg(_wav_path: Path, _out_ogg: Path) -> None:
+        raise AssertionError("split_stems should not pre-encode stems/full.ogg")
 
     def _stub_split(source_dir: Path, _model: str, _progress_cb, _base_frac,
                     _span_frac, *, transcribe_lyrics=None,
@@ -285,7 +284,7 @@ def test_split_during_conversion_uses_decoded_wav_without_packing_it(
         assert separation_audio is not None
         observed["suffix"] = separation_audio.suffix
         observed["bytes"] = separation_audio.read_bytes()
-        (source_dir / "stems" / "full.ogg").unlink()
+        observed["full_ogg_exists"] = (source_dir / "stems" / "full.ogg").exists()
         vocals = source_dir / "stems" / "vocals.ogg"
         vocals.write_bytes(b"OggS" + b"\x00" * 256)
         sloppak_convert._rewrite_stems_manifest(
@@ -301,7 +300,11 @@ def test_split_during_conversion_uses_decoded_wav_without_packing_it(
     out = tmp_path / "split.sloppak"
     convert_psarc_to_sloppak(FIXTURE, out, split_stems=True)
 
-    assert observed == {"suffix": ".wav", "bytes": b"RIFF" + b"\x00" * 256}
+    assert observed == {
+        "suffix": ".wav",
+        "bytes": b"RIFF" + b"\x00" * 256,
+        "full_ogg_exists": False,
+    }
     with zipfile.ZipFile(out) as zf:
         assert "stems/vocals.ogg" in zf.namelist()
         assert "stems/full.ogg" not in zf.namelist()

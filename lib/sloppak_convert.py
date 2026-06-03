@@ -445,7 +445,7 @@ def convert_psarc_to_sloppak(
         if split_stems:
             full_wav = work_dir / "full.wav"
             _wem_to_wav(wems[0], full_wav)
-            _encode_ogg(full_wav, full_ogg)
+            full_ogg.parent.mkdir(parents=True, exist_ok=True)
         else:
             _wem_to_ogg(wems[0], full_ogg)
 
@@ -928,7 +928,9 @@ def _run_demucs(audio_path: Path, out_dir: Path, model: str) -> Path:
 
 
 def _encode_ogg(wav_path: Path, ogg_path: Path) -> None:
-    ffmpeg = _ffmpeg_cmd() or "ffmpeg"
+    ffmpeg = _ffmpeg_cmd()
+    if ffmpeg is None:
+        raise RuntimeError("ffmpeg not found on PATH")
     ogg_path.parent.mkdir(parents=True, exist_ok=True)
     r = _ffmpeg_wav_to_ogg(ffmpeg, wav_path, ogg_path)
     if r.returncode != 0 or not ogg_path.exists():
@@ -1546,11 +1548,14 @@ def _split_in_dir(
     separation_audio: Path | None = None,
 ) -> None:
     full_ogg = source_dir / "stems" / "full.ogg"
-    if not full_ogg.exists():
-        raise FileNotFoundError(
-            f"{full_ogg} not found — run PSARC conversion first or add stems/full.ogg."
-        )
-    separation_audio = separation_audio or full_ogg
+    if separation_audio is None:
+        if not full_ogg.exists():
+            raise FileNotFoundError(
+                f"{full_ogg} not found - run PSARC conversion first or add stems/full.ogg."
+            )
+        separation_audio = full_ogg
+    elif not separation_audio.exists():
+        raise FileNotFoundError(f"{separation_audio} not found.")
 
     # Try remote demucs server first, fall back to local
     remote_url = _get_demucs_server_url()
@@ -1611,12 +1616,10 @@ def _split_in_dir(
     produced.sort(key=_order_key)
 
     # Optional WhisperX transcription + pitch extraction — runs after
-    # stems are encoded but before `full.ogg` is removed (the order
-    # doesn't strictly matter for the vocals stem, which is
-    # independent, but keeping `full.ogg` around through the
-    # transcription call gives a fallback input if a future variant
-    # ever needs the mixed track). Wrapped internally so failures
-    # don't break the split. The `enabled` argument controls only
+    # stems are encoded but before an existing `full.ogg` is removed.
+    # Conversion-time splitting may provide a lossless WAV directly,
+    # so `full.ogg` is optional in that path. Wrapped internally so
+    # failures don't break the split. The `enabled` argument controls only
     # WhisperX; _maybe_transcribe_lyrics still attempts pitch
     # extraction on existing lyrics when wx is off but pitch is on.
     if needs_post_split:

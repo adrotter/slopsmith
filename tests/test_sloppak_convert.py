@@ -496,6 +496,21 @@ def test_ffmpeg_wav_to_ogg_does_not_retry_on_unrelated_error(tmp_path, monkeypat
     assert len(cmds) == 1  # no retry
 
 
+def test_encode_ogg_raises_runtime_error_when_ffmpeg_missing(tmp_path, monkeypatch):
+    wav = tmp_path / "in.wav"
+    wav.write_bytes(b"\x00" * 200)
+    out_ogg = tmp_path / "out.ogg"
+    monkeypatch.setattr(sloppak_convert, "_ffmpeg_cmd", lambda: None)
+    monkeypatch.setattr(
+        sloppak_convert,
+        "_ffmpeg_wav_to_ogg",
+        lambda *args, **kwargs: pytest.fail("_ffmpeg_wav_to_ogg should not run"),
+    )
+
+    with pytest.raises(RuntimeError, match="ffmpeg not found on PATH"):
+        sloppak_convert._encode_ogg(wav, out_ogg)
+
+
 # ── cleanup_stale_temp_dirs (issue topkoa/slopsmith-plugin-sloppak-converter#24) ─
 
 
@@ -745,9 +760,6 @@ def test_stem_separation_constants_are_stable():
 
 def test_split_in_dir_prefers_explicit_lossless_audio(tmp_path, monkeypatch):
     stems_dir = tmp_path / "stems"
-    stems_dir.mkdir()
-    full_ogg = stems_dir / "full.ogg"
-    full_ogg.write_bytes(b"OggS" + b"\x00" * 256)
     lossless_wav = tmp_path / "full.wav"
     lossless_wav.write_bytes(b"RIFF" + b"\x00" * 256)
     _write_minimal_manifest(tmp_path)
@@ -780,7 +792,7 @@ def test_split_in_dir_prefers_explicit_lossless_audio(tmp_path, monkeypatch):
 
     assert observed == {"audio_path": lossless_wav, "model": "test-model"}
     assert (stems_dir / "vocals.ogg").is_file()
-    assert not full_ogg.exists()
+    assert not (stems_dir / "full.ogg").exists()
 
 
 def test_run_demucs_remote_uploads_wav_with_wav_content_type(tmp_path, monkeypatch):

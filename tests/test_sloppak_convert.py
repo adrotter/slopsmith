@@ -774,6 +774,9 @@ def test_split_in_dir_prefers_explicit_lossless_audio(tmp_path, monkeypatch):
         return result_dir
 
     def _stub_encode(_wav_path, out_ogg):
+        # Mirror the real _encode_ogg, which mkdirs the parent before writing —
+        # _split_in_dir relies on that and does not create stems/ itself.
+        out_ogg.parent.mkdir(parents=True, exist_ok=True)
         out_ogg.write_bytes(b"OggS" + b"\x00" * 256)
 
     monkeypatch.setattr(sloppak_convert, "_get_demucs_server_url",
